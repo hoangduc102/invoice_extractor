@@ -1,0 +1,22 @@
+[
+  {
+    "name": "vendor_name",
+    "description": "Bank name for Statement."
+  },
+  {
+    "name": "account_number",
+    "description": "Bank account number"
+  },
+  {
+    "name": "statement_date",
+    "description": "The date of the statement."
+  },
+  {
+    "name": "currency",
+    "description": "currency code or symbol (USD, EUR, $, etc.)."
+  },
+  {
+    "name": "line_items",
+    "description": "Array of objects with name, description, and amount."
+  }
+]

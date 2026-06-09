@@ -1,0 +1,10 @@
+streamlit
+docling
+python-dotenv
+langchain-core
+langchain-ollama
+pdf2image
+Pillow
+pandas
+langgraph
+rich
