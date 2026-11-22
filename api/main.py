@@ -9,19 +9,22 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import UnidentifiedImageError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from api.database import Base, engine, get_db
+from api.database import get_db, init_db
 from api.models import Invoice
+from api.repository import save_extraction
 from api.schemas import InvoiceDetail, InvoiceList, Stats, VendorStats
-from core.invoice_pipeline import DEFAULT_MODEL_NAME, MISSING_VALUE, parse_amount, run_extraction
+from core.invoice_pipeline import DEFAULT_MODEL_NAME, OLLAMA_BASE_URL, run_extraction
 
 logger = logging.getLogger("invoice_api")
 
@@ -33,8 +36,7 @@ Extractor = Callable[[bytes, str, str], dict]
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Simple bootstrap; switch to Alembic migrations once the schema starts evolving.
-    Base.metadata.create_all(bind=engine)
+    init_db()
     yield
 
 
@@ -43,6 +45,14 @@ app = FastAPI(
     version="1.0.0",
     description="Extract structured invoice data with a self-correcting LangGraph + Ollama pipeline.",
     lifespan=lifespan,
+)
+
+# Browser clients (the Next.js frontend) run on another origin.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["*"],
 )
 
 
@@ -63,10 +73,6 @@ def _resolve_content_type(upload: UploadFile) -> str:
         status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
         detail=f"Unsupported file type '{content_type or 'unknown'}'. Allowed: PDF, PNG, JPEG, WEBP.",
     )
-
-
-def _none_if_missing(value: str | None) -> str | None:
-    return None if value in (None, "", MISSING_VALUE) else value
 
 
 def _get_invoice_or_404(db: Session, invoice_id: int) -> Invoice:
@@ -109,34 +115,19 @@ def extract_invoice(
     try:
         result = extractor(data, content_type, model_name)
     except (UnidentifiedImageError, ValueError) as exc:
-        raise HTTPException(422, f"Could not read document: {exc}") from exc
+        logger.info("Unreadable upload %s: %s", file.filename, exc)
+        raise HTTPException(422, "Could not read the document. Is it a valid PDF or image?") from exc
     except Exception as exc:  # LLM backend down, model not pulled, timeout, ...
         logger.exception("Extraction failed")
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Extraction backend error: {exc}") from exc
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Extraction backend error ({type(exc).__name__}). Check that Ollama is running at "
+            f"{OLLAMA_BASE_URL} and the model '{model_name}' is pulled.",
+        ) from exc
 
-    fields = {k: v for k, v in result.get("structured_data", {}).items() if not k.startswith("_")}
-    missing = list(result.get("missing_fields", []))
-
-    invoice = Invoice(
-        filename=file.filename or "upload",
-        content_type=content_type,
-        model_name=model_name,
-        invoice_number=_none_if_missing(fields.get("INVOICE_NUMBER")),
-        vendor_name=_none_if_missing(fields.get("VENDOR_NAME")),
-        invoice_date=_none_if_missing(fields.get("DATE")),
-        currency=_none_if_missing(fields.get("CURRENCY")),
-        total_raw=_none_if_missing(fields.get("TOTAL")),
-        total_amount=parse_amount(fields.get("TOTAL")),
-        status="incomplete" if missing else "complete",
-        retry_count=result.get("retry_count", 0),
-        missing_fields=missing,
-        fields=fields,
-        raw_text=result.get("raw_text", ""),
+    return save_extraction(
+        db, result, filename=file.filename or "upload", content_type=content_type, model_name=model_name
     )
-    db.add(invoice)
-    db.commit()
-    db.refresh(invoice)
-    return invoice
 
 
 @app.get("/invoices", response_model=InvoiceList, tags=["invoices"])
@@ -154,9 +145,7 @@ def list_invoices(
         query = query.where(Invoice.status == status_filter)
 
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-    rows = db.scalars(
-        query.order_by(Invoice.created_at.desc(), Invoice.id.desc()).limit(limit).offset(offset)
-    ).all()
+    rows = db.scalars(query.order_by(Invoice.created_at.desc(), Invoice.id.desc()).limit(limit).offset(offset)).all()
     return InvoiceList(total=total, limit=limit, offset=offset, items=list(rows))
 
 

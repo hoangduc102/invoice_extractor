@@ -11,12 +11,13 @@ This file is organized for teaching:
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import streamlit as st
 from pdf2image import convert_from_bytes
 
+from api.database import SessionLocal, init_db
+from api.repository import list_recent, save_extraction
 from core.invoice_pipeline import (
     DEFAULT_MODEL_NAME,
     MISSING_VALUE,
@@ -64,47 +65,49 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 
 
 # ----------------------------- History Logic ---------------------------------
-HISTORY_FILE = "history.json"
+# History is stored in the same database as the REST API (DATABASE_URL in .env):
+# PostgreSQL in Docker, a local SQLite file otherwise.
+@st.cache_resource
+def _ensure_db() -> bool:
+    init_db()
+    return True
 
 
-def load_history() -> list[dict[str, Any]]:
-    """Load extraction history from local JSON file."""
-    if not os.path.exists(HISTORY_FILE):
-        return []
+def load_history(limit: int = 100) -> list[dict[str, Any]]:
+    """Most recent extractions, newest first."""
+    _ensure_db()
+    with SessionLocal() as db:
+        rows = list_recent(db, limit=limit)
+    return [
+        {
+            "id": row.id,
+            "timestamp": row.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "vendor_name": row.vendor_name or MISSING_VALUE,
+            "invoice_number": row.invoice_number or MISSING_VALUE,
+            "date": row.invoice_date or MISSING_VALUE,
+            "total": row.total_raw or MISSING_VALUE,
+            "currency": row.currency or MISSING_VALUE,
+            "full_data": row.fields,
+        }
+        for row in rows
+    ]
+
+
+def save_to_history(result: InvoiceState, filename: str, mime_type: str) -> None:
+    """Persist an extraction, skipping it if identical to the latest row."""
+    _ensure_db()
     try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-
-def save_to_history(data: dict[str, Any]) -> None:
-    """Append a successful extraction to history.json, skipping duplicates."""
-    from datetime import datetime
-    history = load_history()
-    
-    # Build the clean data payload (without internal metadata)
-    clean_data = {k: v for k, v in data.items() if k != "_VALIDATION"}
-    
-    # Skip saving if the last history entry has identical extracted data
-    if history and history[-1].get("full_data") == clean_data:
-        return
-    
-    record = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "vendor_name": data.get("VENDOR_NAME", MISSING_VALUE),
-        "invoice_number": data.get("INVOICE_NUMBER", MISSING_VALUE),
-        "date": data.get("DATE", MISSING_VALUE),
-        "total": data.get("TOTAL", MISSING_VALUE),
-        "currency": data.get("CURRENCY", MISSING_VALUE),
-        "full_data": clean_data,
-    }
-    history.append(record)
-    try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
+        with SessionLocal() as db:
+            save_extraction(
+                db,
+                result,
+                filename=filename,
+                content_type=mime_type,
+                model_name=result["model_name"],
+                skip_if_duplicate=True,
+            )
+    except Exception as exc:  # keep the UI usable if the DB is down
+        st.warning(f"Could not save to history database: {exc}")
 
 
 # ------------------------------- UI Helpers ----------------------------------
@@ -140,7 +143,9 @@ def render_invoice_preview(file_bytes: bytes, mime_type: str) -> None:
     st.image(file_bytes, caption="Invoice Preview")
 
 
-def process_invoice(file_bytes: bytes, mime_type: str, model_name: str, status: Any) -> InvoiceState:
+def process_invoice(
+    file_bytes: bytes, mime_type: str, model_name: str, status: Any, filename: str = "upload"
+) -> InvoiceState:
     """Run the end-to-end extraction flow and return final graph state."""
     status.write("Converting uploaded document to image...")
     image_b64 = file_bytes_to_base64_png(file_bytes, mime_type)
@@ -165,11 +170,13 @@ def process_invoice(file_bytes: bytes, mime_type: str, model_name: str, status: 
                 else:
                     status.write("Validation successful: All critical fields found.")
             elif node_name == "correct_extraction":
-                status.write("[Self-Correction] Critical fields missing. Re-submitting to LLM to focus on missing data...")
+                status.write(
+                    "[Self-Correction] Critical fields missing. Re-submitting to LLM to focus on missing data..."
+                )
 
     status.update(label="Extraction complete", state="complete")
     if result.get("structured_data"):
-        save_to_history(result["structured_data"])
+        save_to_history(result, filename, mime_type)
     return result
 
 
@@ -185,7 +192,7 @@ def render_results(result: InvoiceState) -> None:
 
     key_metrics = ["INVOICE_NUMBER", "DATE", "TOTAL", "CURRENCY"]
     metric_cols = st.columns(len(key_metrics))
-    for col, key in zip(metric_cols, key_metrics):
+    for col, key in zip(metric_cols, key_metrics, strict=True):
         with col:
             render_field_card(key, data.get(key, MISSING_VALUE))
 
@@ -256,6 +263,7 @@ def main() -> None:
                         mime_type=uploaded_file.type,
                         model_name=model_name,
                         status=status,
+                        filename=uploaded_file.name,
                     )
 
             if "result" in st.session_state:
@@ -270,18 +278,20 @@ def main() -> None:
             import pandas as pd
 
             # Show history newest-first
-            reversed_history = list(reversed(history))
+            reversed_history = history  # already newest first
             history_data = []
             for idx, item in enumerate(reversed_history):
-                history_data.append({
-                    "No.": idx + 1,
-                    "Timestamp": item.get("timestamp"),
-                    "Vendor Name": item.get("vendor_name"),
-                    "Invoice Number": item.get("invoice_number"),
-                    "Date": item.get("date"),
-                    "Total": item.get("total"),
-                    "Currency": item.get("currency"),
-                })
+                history_data.append(
+                    {
+                        "No.": idx + 1,
+                        "Timestamp": item.get("timestamp"),
+                        "Vendor Name": item.get("vendor_name"),
+                        "Invoice Number": item.get("invoice_number"),
+                        "Date": item.get("date"),
+                        "Total": item.get("total"),
+                        "Currency": item.get("currency"),
+                    }
+                )
             df = pd.DataFrame(history_data)
             st.dataframe(df, use_container_width=True, hide_index=True)
 

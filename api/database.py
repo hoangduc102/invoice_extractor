@@ -29,3 +29,10 @@ def get_db() -> Iterator[Session]:
         yield db
     finally:
         db.close()
+
+
+def init_db() -> None:
+    """Create tables if missing. Swap for Alembic migrations once the schema evolves."""
+    from api import models  # noqa: F401  (register models on Base.metadata)
+
+    Base.metadata.create_all(bind=engine)

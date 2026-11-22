@@ -50,9 +50,7 @@ def fake_extractor() -> FakeExtractor:
 
 @pytest.fixture
 def client(fake_extractor: FakeExtractor):
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     TestSession = sessionmaker(bind=engine, expire_on_commit=False)
 

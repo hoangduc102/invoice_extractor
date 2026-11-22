@@ -1,12 +1,15 @@
 """General document extractor with Docling or multimodal-only LLM modes."""
+
 import base64
 import json
 import os
 import re
 import tempfile
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+
 import pandas as pd
 import streamlit as st
 from docling.document_converter import DocumentConverter
@@ -14,15 +17,14 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from pdf2image import convert_from_bytes
-from rich import print
-import time
+
 load_dotenv()
 
 ########################### App Configuration & Constants ###########################
 
 APP_TITLE = "Document Extractor"
 # qwen3.5:2b, qwen3.5:4b, qwen3.5:9b, ministral-3:3b, qwen3.5:0.8b
-DEFAULT_MODEL_LIST = ['ministral-3:3b', 'qwen3-vl:2b', 'gemma3:4b']
+DEFAULT_MODEL_LIST = ["ministral-3:3b", "qwen3-vl:2b", "gemma3:4b"]
 # DEFAULT_MODEL_NAME = "qwen3.5:2b"
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")  # Fall back to local Ollama instance
 SUPPORTED_UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "webp"]
@@ -87,9 +89,7 @@ ExtractionState = dict[str, Any]
 def normalize_name(name: str) -> str:
     """Convert an arbitrary string into a clean, lowercase snake_case key."""
     # Strip non-alphanumeric characters and collapse repeated underscores for consistent key formatting
-    return re.sub(
-        r"_+", "_", re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower())
-    ).strip("_")
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower())).strip("_")
 
 
 def normalize_fields(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -101,19 +101,14 @@ def normalize_fields(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
         key = normalize_name(row.get("name", ""))
         if not key:
             continue
-        deduped.pop(
-            key, None
-        )  # Move duplicate keys to the end so the latest entry wins
+        deduped.pop(key, None)  # Move duplicate keys to the end so the latest entry wins
         # Strip description to ensure consistent formatting
         deduped[key] = str(row.get("description", "")).strip()
     # Return a list of normalized field dicts
-    return [
-        {"name": key, "description": description}
-        for key, description in deduped.items()
-    ]
+    return [{"name": key, "description": description} for key, description in deduped.items()]
+
 
 ########################### Schema Persistence ###########################
-
 
 
 def load_fields() -> list[dict[str, str]]:
@@ -135,9 +130,7 @@ def load_fields() -> list[dict[str, str]]:
 def save_fields(fields: list[dict[str, Any]]) -> None:
     """Persist normalized field definitions to the JSON schema file."""
     # Normalize before saving to ensure the file always contains clean, consistent keys
-    SCHEMA_PATH.write_text(
-        json.dumps(normalize_fields(fields), indent=2), encoding="utf-8"
-    )
+    SCHEMA_PATH.write_text(json.dumps(normalize_fields(fields), indent=2), encoding="utf-8")
 
 
 ########################### Document Processing ###########################
@@ -149,12 +142,11 @@ def get_docling_converter() -> Any:
     """Return a singleton Docling DocumentConverter instance. cache_resource ensures single instance per session."""
     return DocumentConverter()
 
+
 def extract_text_with_docling(file_name: str, file_type: str, file_bytes: bytes) -> str:
     """Convert a document to markdown text using the Docling library."""
     # Map MIME types to file extensions so Docling can infer the correct parser
-    suffix = MIME_SUFFIXES.get(
-        file_type, Path(file_name).suffix or ".bin"
-    )  # Fall back to original extension
+    suffix = MIME_SUFFIXES.get(file_type, Path(file_name).suffix or ".bin")  # Fall back to original extension
 
     # Write bytes to a temp file because Docling requires a file-system path
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -176,20 +168,15 @@ def to_base64_images(file_type: str, file_bytes: bytes) -> list[tuple[str, str]]
         # Convert each PDF page to a base64-encoded PNG image
         encoded_pages: list[tuple[str, str]] = []
         # Use 200 dpi to balance quality and token size for LLM input
-        for image in convert_from_bytes(
-            file_bytes, dpi=200
-        ):  # 200 dpi balances quality and token size
+        for image in convert_from_bytes(file_bytes, dpi=200):  # 200 dpi balances quality and token size
             # Encode each page image as base64 PNG
             buf = BytesIO()
             image.save(buf, format="PNG")
             # Append the (MIME type, base64 string) tuple for this page
-            encoded_pages.append(
-                ("image/png", base64.b64encode(buf.getvalue()).decode("utf-8"))
-            )
+            encoded_pages.append(("image/png", base64.b64encode(buf.getvalue()).decode("utf-8")))
         return encoded_pages
     # For raster images, return a single (MIME type, base64 string) tuple
     return [(file_type, base64.b64encode(file_bytes).decode("utf-8"))]
-
 
 
 def build_multimodal_content(file_type: str, file_bytes: bytes) -> list[dict[str, Any]]:
@@ -199,10 +186,7 @@ def build_multimodal_content(file_type: str, file_bytes: bytes) -> list[dict[str
     prompt = "Extract information from this document image."
     if file_type == "application/pdf":
         # Adjust prompt for multi-page PDFs
-        prompt = (
-            f"Extract information from this {len(images)}-page PDF document. "
-            "Use all pages before returning JSON."
-        )
+        prompt = f"Extract information from this {len(images)}-page PDF document. Use all pages before returning JSON."
     # Start with the text prompt
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     # Append each page image with an optional page label for multi-page PDFs
@@ -219,6 +203,7 @@ def build_multimodal_content(file_type: str, file_bytes: bytes) -> list[dict[str
             }
         )
     return content
+
 
 ########################### LLM Prompt Construction ###########################
 
@@ -244,6 +229,7 @@ def build_system_prompt(field_defs: list[dict[str, str]]) -> str:
 
 
 ########################### Response Parsing ###########################
+
 
 def parse_json_content(content: Any) -> tuple[str, dict[str, Any]]:
     """Parse LLM output into a (raw_string, parsed_dict) tuple, handling various response formats. list is used for multi-part messages from multimodal inputs."""
@@ -271,21 +257,19 @@ def parse_json_content(content: Any) -> tuple[str, dict[str, Any]]:
         raw = str(content).strip()
 
     # Strip markdown code fences that some models wrap around JSON output
-    cleaned = (
-        raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    )
+    cleaned = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     # Parse and return the cleaned JSON content
     return raw, json.loads(cleaned)
 
+
 ########################### Extraction Workflow ###########################
+
 
 # @st.cache_resource
 def make_llm(model_name: str) -> ChatOllama:
     """Create an Ollama chat client configured for deterministic JSON output."""
     # Use temperature=0 for deterministic, structured JSON extraction
-    return ChatOllama(
-        model=model_name, temperature=0, format="json", base_url=OLLAMA_BASE_URL
-    )
+    return ChatOllama(model=model_name, temperature=0, format="json", base_url=OLLAMA_BASE_URL)
 
 
 def extract_with_prompt(
@@ -304,10 +288,7 @@ def extract_with_prompt(
     return parse_json_content(response.content)
 
 
-
-def run_extraction(
-    file_name: str, file_type: str, file_bytes: bytes, model_name: str, mode: str
-) -> ExtractionState:
+def run_extraction(file_name: str, file_type: str, file_bytes: bytes, model_name: str, mode: str) -> ExtractionState:
     """Orchestrate the full extraction pipeline based on the selected mode."""
     # Bundle all inputs into a shared state dict for downstream steps to reference
     state: ExtractionState = {
@@ -315,9 +296,7 @@ def run_extraction(
         "file_type": file_type,
         "file_bytes": file_bytes,
         "model_name": model_name,
-        "field_defs": st.session_state[
-            "field_defs"
-        ],  # Pull live field definitions from session state
+        "field_defs": st.session_state["field_defs"],  # Pull live field definitions from session state
         "mode": mode,
     }
 
@@ -371,6 +350,7 @@ def render_file_preview(file_type: str, file_name: str, file_bytes: bytes) -> No
             unsafe_allow_html=True,  # Required to inject raw HTML into Streamlit
         )
 
+
 def render_results(result: ExtractionState) -> None:
     """Display extraction results with JSON preview, CSV download, and debug expanders."""
     st.subheader("Extracted JSON")
@@ -390,9 +370,7 @@ def render_results(result: ExtractionState) -> None:
                 normalized_for_csv[key] = value
     else:
         # If extracted_fields is not a dict, treat it as a single value
-        normalized_for_csv = {
-            "extracted_data": json.dumps(extracted_fields, ensure_ascii=False)
-        }
+        normalized_for_csv = {"extracted_data": json.dumps(extracted_fields, ensure_ascii=False)}
 
     # Generate CSV bytes for download
     csv_bytes = pd.DataFrame([normalized_for_csv]).to_csv(index=False).encode("utf-8")
@@ -427,9 +405,7 @@ def render_extract_tab() -> None:
         model_name = st.selectbox("Ollama model", options=DEFAULT_MODEL_LIST, index=0)
         # model_name = st.text_input("Ollama model", value=DEFAULT_MODEL_NAME)
         mode_label = st.radio("Extraction method", list(MODE_OPTIONS), index=1)
-        uploaded_file = st.file_uploader(
-            "Upload invoice", type=SUPPORTED_UPLOAD_TYPES, key="upload_file"
-        )
+        uploaded_file = st.file_uploader("Upload invoice", type=SUPPORTED_UPLOAD_TYPES, key="upload_file")
     # Map the selected mode label to its internal identifier
     mode = MODE_OPTIONS[mode_label]
 
@@ -460,16 +436,10 @@ def render_extract_tab() -> None:
 def render_fields_tab() -> None:
     """Render the field schema editor tab for customizing extraction fields."""
     st.write("Add or remove field names and descriptions used for extraction.")
-    edited = st.data_editor(
-        st.session_state["field_defs"], num_rows="dynamic", width="stretch"
-    )
+    edited = st.data_editor(st.session_state["field_defs"], num_rows="dynamic", width="stretch")
 
     # Handle both pandas DataFrames and plain list-of-dicts returned by the editor
-    rows = (
-        edited.to_dict("records")
-        if hasattr(edited, "to_dict")
-        else [dict(row) for row in edited]
-    )
+    rows = edited.to_dict("records") if hasattr(edited, "to_dict") else [dict(row) for row in edited]
     normalized = normalize_fields(rows)
 
     # Show the user exactly which keys will be sent to the LLM after normalization
@@ -487,7 +457,6 @@ def render_fields_tab() -> None:
         st.session_state["field_defs"] = defaults
         save_fields(defaults)
         st.rerun()  # Refresh the UI to reflect the reset values
-
 
 
 ########################### App Entry Point ###########################
@@ -509,5 +478,7 @@ def main() -> None:
         render_extract_tab()
     with fields_tab:
         render_fields_tab()
+
+
 if __name__ == "__main__":
     main()

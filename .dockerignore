@@ -44,3 +44,9 @@ AGENTS.md
 
 # Personal files that live in this folder
 cv-detail.txt
+
+# Separate image (frontend/Dockerfile) / dev-only tooling
+frontend
+evaluation
+requirements-ci.txt
+pyproject.toml

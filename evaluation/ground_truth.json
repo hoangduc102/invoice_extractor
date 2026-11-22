@@ -1,0 +1,196 @@
+{
+  "_README": "Hand-labelled from the documents in example_docs/. A field value may be a single value or a list of acceptable values. null means the field is not on the document, so the correct prediction is N/A (anything else is a hallucination). Dates are ISO (YYYY-MM-DD); amounts are plain numbers. 'notes' records where a value lives when it is NOT on page 1 (the pipeline only sends page 1 to the model). Bank statements are excluded: they are not invoices.",
+  "fields": ["INVOICE_NUMBER", "DATE", "DUE_DATE", "VENDOR_NAME", "CUSTOMER_NAME", "SUBTOTAL", "TAX", "TOTAL", "CURRENCY"],
+  "documents": [
+    {
+      "file": "07306161-1a9c-4f5a-857c-bcdda311baa2.webp",
+      "expected": {
+        "INVOICE_NUMBER": "INV-2023-001",
+        "DATE": "2028-09-07",
+        "DUE_DATE": ["2028-09-21", null],
+        "VENDOR_NAME": "XYZ Company",
+        "CUSTOMER_NAME": "John Doe",
+        "SUBTOTAL": 275.00,
+        "TAX": 25.00,
+        "TOTAL": 275.00,
+        "CURRENCY": ["USD", "$"]
+      },
+      "notes": "Second 'Date' under Payment Method is unlabeled; accepted as due date or N/A."
+    },
+    {
+      "file": "Downloadable-PDF-Invoices-Add-On-Samples.pdf",
+      "expected": {
+        "INVOICE_NUMBER": "13594027",
+        "DATE": "2018-06-23",
+        "DUE_DATE": null,
+        "VENDOR_NAME": "Your Business Name",
+        "CUSTOMER_NAME": "John Smith",
+        "SUBTOTAL": 37.50,
+        "TAX": null,
+        "TOTAL": 37.50,
+        "CURRENCY": "USD"
+      }
+    },
+    {
+      "file": "Simple-Invoice-Template.png",
+      "expected": {
+        "INVOICE_NUMBER": null,
+        "DATE": null,
+        "DUE_DATE": null,
+        "VENDOR_NAME": "Ted's Small Business",
+        "CUSTOMER_NAME": "Sally Yessler",
+        "SUBTOTAL": 6950.00,
+        "TAX": [0, null],
+        "TOTAL": 6950.00,
+        "CURRENCY": ["USD", "$"]
+      },
+      "notes": "Estimate template: Date / Estimate Number are blank lines."
+    },
+    {
+      "file": "Simple-Invoice-Template-2x.jpeg",
+      "expected": {
+        "INVOICE_NUMBER": null,
+        "DATE": null,
+        "DUE_DATE": null,
+        "VENDOR_NAME": "Ted's Small Business",
+        "CUSTOMER_NAME": "Sally Yessler",
+        "SUBTOTAL": 6950.00,
+        "TAX": [0, null],
+        "TOTAL": 6950.00,
+        "CURRENCY": ["USD", "$"]
+      },
+      "notes": "Upscaled JPEG of the same template, with compression artifacts."
+    },
+    {
+      "file": "Simple-Invoice-Template.webp",
+      "expected": {
+        "INVOICE_NUMBER": null,
+        "DATE": null,
+        "DUE_DATE": null,
+        "VENDOR_NAME": "Ted's Small Business",
+        "CUSTOMER_NAME": "Sally Yessler",
+        "SUBTOTAL": 6950.00,
+        "TAX": [0, null],
+        "TOTAL": 6950.00,
+        "CURRENCY": ["USD", "$"]
+      }
+    },
+    {
+      "file": "hourly_invoice_template.png",
+      "expected": {
+        "INVOICE_NUMBER": "0000007",
+        "DATE": "2023-10-02",
+        "DUE_DATE": "2023-10-16",
+        "VENDOR_NAME": "Your Company Inc.",
+        "CUSTOMER_NAME": "Customer Name",
+        "SUBTOTAL": 250.00,
+        "TAX": 12.50,
+        "TOTAL": 262.50,
+        "CURRENCY": "USD"
+      }
+    },
+    {
+      "file": "invoice-0-4.pdf",
+      "expected": {
+        "INVOICE_NUMBER": "BPXINV-00550",
+        "DATE": "2021-05-23",
+        "DUE_DATE": null,
+        "VENDOR_NAME": "Bioplex",
+        "CUSTOMER_NAME": "Roger Bigot",
+        "SUBTOTAL": 5964.50,
+        "TAX": 596.45,
+        "TOTAL": 6610.95,
+        "CURRENCY": [null, "EUR"]
+      },
+      "notes": "SUBTOTAL, TAX, TOTAL are on page 2. Terms say 'Due after 30 days' but no due date is printed."
+    },
+    {
+      "file": "invoice-1-3.pdf",
+      "expected": {
+        "INVOICE_NUMBER": "1213",
+        "DATE": "2021-12-16",
+        "DUE_DATE": null,
+        "VENDOR_NAME": "Zencorporations",
+        "CUSTOMER_NAME": "La Galerie",
+        "SUBTOTAL": 2553.91,
+        "TAX": 255.39,
+        "TOTAL": 2809.30,
+        "CURRENCY": "EUR"
+      },
+      "notes": "SUBTOTAL, TAX, TOTAL are on page 2."
+    },
+    {
+      "file": "invoice-2-1.pdf",
+      "expected": {
+        "INVOICE_NUMBER": "0012820",
+        "DATE": "2019-08-27",
+        "DUE_DATE": "2019-09-27",
+        "VENDOR_NAME": "ConIncorporated",
+        "CUSTOMER_NAME": ["Caitlin Roberts", "Awthentikz"],
+        "SUBTOTAL": null,
+        "TAX": null,
+        "TOTAL": null,
+        "CURRENCY": [null, "GBP"]
+      },
+      "notes": "The document has line items but no printed subtotal/total."
+    },
+    {
+      "file": "invoice-3-0.pdf",
+      "expected": {
+        "INVOICE_NUMBER": "4235",
+        "DATE": "2021-10-12",
+        "DUE_DATE": "2021-11-12",
+        "VENDOR_NAME": "Neid",
+        "CUSTOMER_NAME": "Obacht AG",
+        "SUBTOTAL": 187700,
+        "TAX": 18770,
+        "TOTAL": 213470,
+        "CURRENCY": [null, "EUR"]
+      },
+      "notes": "Invoice number is printed vertically; due date only appears as 'Total Due By: November 12, 2021'."
+    },
+    {
+      "file": "invoice-7-0.pdf",
+      "expected": {
+        "INVOICE_NUMBER": "NP#00183",
+        "DATE": "2020-06-24",
+        "DUE_DATE": "2020-09-24",
+        "VENDOR_NAME": "notapino",
+        "CUSTOMER_NAME": "Actoonda",
+        "SUBTOTAL": null,
+        "TAX": null,
+        "TOTAL": null,
+        "CURRENCY": [null, "EUR"]
+      },
+      "notes": "Line items with EUR prices start on page 2; the sample is truncated and has no total."
+    },
+    {
+      "file": "simple-template-example.png",
+      "expected": {
+        "INVOICE_NUMBER": "2022006",
+        "DATE": "2022-06-30",
+        "DUE_DATE": "2022-07-14",
+        "VENDOR_NAME": ["Garden repairs", "Your business name"],
+        "CUSTOMER_NAME": "Your client's name",
+        "SUBTOTAL": [100.00, null],
+        "TAX": null,
+        "TOTAL": 100.00,
+        "CURRENCY": "NZD"
+      }
+    },
+    {
+      "file": "wordpress-pdf-invoice-plugin-sample.pdf",
+      "expected": {
+        "INVOICE_NUMBER": "INV-3337",
+        "DATE": "2016-01-25",
+        "DUE_DATE": "2016-01-31",
+        "VENDOR_NAME": "DEMO - Sliced Invoices",
+        "CUSTOMER_NAME": "Test Business",
+        "SUBTOTAL": 85.00,
+        "TAX": 8.50,
+        "TOTAL": 93.50,
+        "CURRENCY": ["USD", "AUD", "$"]
+      }
+    }
+  ]
+}

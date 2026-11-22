@@ -122,9 +122,7 @@ def add_validation_message(fields: dict[str, str]) -> dict[str, str]:
     missing = find_missing_critical(fields)
     validated = dict(fields)
     validated["_VALIDATION"] = (
-        "All critical fields found"
-        if not missing
-        else f"Missing critical fields: {', '.join(missing)}"
+        "All critical fields found" if not missing else f"Missing critical fields: {', '.join(missing)}"
     )
     return validated
 

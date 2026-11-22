@@ -1,5 +1,7 @@
 # Invoice & Document Extractor Suite 📄🤖
 
+[![CI](https://github.com/hoangduc102/invoice_extractor/actions/workflows/ci.yml/badge.svg)](https://github.com/hoangduc102/invoice_extractor/actions/workflows/ci.yml)
+
 A comprehensive suite of Streamlit web applications for extracting structured data from invoices and general documents (PDFs and images) using **LangChain**, **Ollama**, **LangGraph**, and **Docling**.
 
 ---
@@ -16,7 +18,7 @@ All applications run locally using **Ollama** for privacy and offline capability
 
 | Application File | Purpose & Focus | LLM Input Type | Key Tech | Unique Features |
 | :--- | :--- | :--- | :--- | :--- |
-| **`invoice_extractor.py`** *(Main)* | **Self-Correcting Invoice Extractor** | Multimodal (Vision) | LangGraph, ChatOllama | **Self-correction (retries)** when critical fields (Total, Vendor, Date, Inv #) are missing; metrics cards; local extraction history (`history.json`). |
+| **`invoice_extractor.py`** *(Main)* | **Self-Correcting Invoice Extractor** | Multimodal (Vision) | LangGraph, ChatOllama | **Self-correction (retries)** when critical fields (Total, Vendor, Date, Inv #) are missing; metrics cards; extraction history stored in the shared database (same table as the REST API). |
 | **`extractor_app.py`** | **General Document Extractor** | Text or Multimodal | Docling, ChatOllama | **Dynamic schema editor** (edit & save fields to `field_schema.json`); supports Docling markdown rendering or Multimodal vision; **CSV export**. |
 | **`general_app_v2.py`** | **LangGraph General Extractor** | Text or Multimodal | LangGraph, Docling, ChatOllama | Refactored LangGraph implementation of the schema-configurable extractor (`extractor_app.py`). |
 | **`docling_app.py`** | **Docling/Multimodal Invoice Extractor** | Text or Multimodal | LangGraph, Docling, ChatOllama | LangGraph-based invoice extractor comparing text-based parsing via Docling vs. vision-based parsing. |
@@ -71,8 +73,8 @@ The `pdf2image` library requires **Poppler** to rasterize PDF pages into images 
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/Invoice_Extractor.git
-   cd Invoice_Extractor
+   git clone https://github.com/hoangduc102/invoice_extractor.git
+   cd invoice_extractor
    ```
 
 2. **Install the dependencies**:
@@ -106,7 +108,7 @@ DEFAULT_MODEL=llava
 Start any app using `streamlit run <filename>`.
 
 ### 1. Self-Correcting Invoice Extractor (Main App)
-Features UI cards, validation checking, local history (`history.json`), and self-correction cycles.
+Features UI cards, validation checking, extraction history in the shared database, and self-correction cycles.
 ```bash
 streamlit run invoice_extractor.py
 ```
@@ -136,10 +138,11 @@ streamlit run docling_app.py
 The self-correcting pipeline is also exposed as a REST API that saves every extraction to a database.
 The same LangGraph code (`core/invoice_pipeline.py`) runs behind both the API and the Streamlit app.
 
-### Run with Docker (API + PostgreSQL)
+### Run with Docker (PostgreSQL + API + Web UI)
 ```bash
 ollama serve                         # on the host
-docker compose up db api --build
+docker compose up db api web --build
+# Web UI:     http://localhost:3000
 # Swagger UI: http://localhost:8000/docs
 ```
 
@@ -171,11 +174,65 @@ The full field set lives in a `JSONB` column. Values the model leaves as `N/A` a
 Error handling: unsupported type → `415`, file over 10 MB → `413`, unreadable document → `422`,
 Ollama unreachable or model error → `502` (nothing is saved).
 
-### Tests
+---
+
+## 🖥️ Web UI (Next.js)
+
+`frontend/` is a Next.js 16 + TypeScript + Tailwind app on top of the REST API: drag-and-drop upload,
+the extracted fields (missing ones highlighted, with the self-correction retry count), and a table of saved
+invoices with vendor search, status filter, pagination, a detail view with the raw model output, and delete.
+
 ```bash
+uvicorn api.main:app --reload            # API on :8000
+cd frontend && npm install && npm run dev  # UI on http://localhost:3000
+```
+Set `NEXT_PUBLIC_API_URL` if the API is not on `localhost:8000`, and `CORS_ORIGINS` on the API if the UI is not on `localhost:3000`.
+
+---
+
+## 📊 Accuracy Evaluation
+
+LLM output is non-deterministic, so "it works on my invoice" is not evidence. `evaluation/` measures it:
+
+* `evaluation/ground_truth.json`: 12 invoices from `example_docs/`, labelled by hand (bank statements excluded).
+  Fields that are *not* on a document are labelled `null`, so an invented value counts as a **hallucination**.
+* `evaluation/scoring.py` normalizes before comparing: amounts numerically (`"$6,950.00"` = `6950`),
+  dates in any format (`"23.05.2021"` = `"May 23, 2021"`), invoice numbers on alphanumerics, names by fuzzy match.
+* Each run records the **first-pass** answer and the **final** answer after the LangGraph retry loop,
+  so the report shows how much self-correction actually helps. `--runs N` also measures run-to-run consistency.
+
+```bash
+ollama pull llava
+python -m evaluation.evaluate --model llava --runs 3 --update-readme
+python -m evaluation.evaluate --model llava --model qwen3-vl:2b          # compare models side by side
+python -m evaluation.evaluate --rescore evaluation/results/*.json        # re-score saved runs, no LLM calls
+```
+Raw predictions are saved to `evaluation/results/` so every number below can be re-checked.
+
+### Results
+<!-- EVAL:START -->
+_Not run yet. Start Ollama, then run `python -m evaluation.evaluate --model llava --runs 3 --update-readme` to fill in this table._
+<!-- EVAL:END -->
+
+---
+
+## ✅ Tests & CI
+
+```bash
+pip install -r requirements-ci.txt
+ruff check . && ruff format --check .
 pytest -q
 ```
 The tests replace the LLM with a fake and use in-memory SQLite, so they need neither Ollama nor PostgreSQL.
+They cover the pipeline helpers, the API endpoints, the shared repository, the evaluation scoring, and a Streamlit
+smoke test (`streamlit.testing.AppTest`) that checks the History tab reads from the database.
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and pull request:
+| Job | What it checks |
+| :--- | :--- |
+| Backend | `ruff check`, `ruff format --check`, `pytest` |
+| API against PostgreSQL | Starts the API on a real `postgres:16` service container, hits `/health`, `/invoices`, `/invoices/stats`, and checks extraction fails cleanly (502, nothing saved) when no LLM is available |
+| Frontend | `eslint`, `tsc --noEmit`, `next build` |
 
 ---
 
@@ -183,11 +240,16 @@ The tests replace the LLM with a fake and use in-memory SQLite, so they need nei
 
 ```
 Invoice_Extractor/
-├── api/                 # FastAPI app: routes (main.py), SQLAlchemy models, Pydantic schemas, DB session
+├── .github/workflows/ci.yml # Lint, tests, Postgres integration check, frontend build
+├── api/                 # FastAPI app: routes (main.py), models, schemas, DB session, repository
 ├── core/
 │   └── invoice_pipeline.py # Shared LangGraph self-correcting pipeline (no UI code)
-├── tests/               # pytest: pipeline helpers + API endpoints
-├── docker-compose.yml   # PostgreSQL + API + all Streamlit apps
+├── evaluation/          # Ground truth, scoring, accuracy report script, saved results
+├── frontend/            # Next.js web UI (upload + results table)
+├── tests/               # pytest: pipeline, API, repository, scoring, Streamlit smoke test
+├── docker-compose.yml   # PostgreSQL + API + web UI + all Streamlit apps
+├── pyproject.toml       # ruff + pytest config
+├── requirements-ci.txt  # Lightweight deps for tests/lint (no docling/torch)
 ├── .streamlit/
 │   └── config.toml      # Custom Slate Dark theme settings for Streamlit
 ├── example_docs/        # Sample PDFs, images, and statements for testing
