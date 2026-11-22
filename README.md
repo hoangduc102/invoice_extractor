@@ -131,10 +131,63 @@ streamlit run docling_app.py
 
 ---
 
+## 🌐 REST API (FastAPI + PostgreSQL)
+
+The self-correcting pipeline is also exposed as a REST API that saves every extraction to a database.
+The same LangGraph code (`core/invoice_pipeline.py`) runs behind both the API and the Streamlit app.
+
+### Run with Docker (API + PostgreSQL)
+```bash
+ollama serve                         # on the host
+docker compose up db api --build
+# Swagger UI: http://localhost:8000/docs
+```
+
+### Run locally (SQLite, no Docker)
+```bash
+uvicorn api.main:app --reload        # DATABASE_URL defaults to sqlite:///./invoices.db
+```
+
+### Endpoints
+| Method | Path | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Liveness and DB connectivity check |
+| `POST` | `/invoices/extract` | Upload a PDF/PNG/JPEG/WEBP (`file`, optional `model_name`), run extraction, persist the result |
+| `GET` | `/invoices` | List invoices, newest first. Query params: `vendor` (substring, case-insensitive), `status` (`complete`/`incomplete`), `limit`, `offset` |
+| `GET` | `/invoices/stats` | Counts by status and top vendors with summed totals |
+| `GET` | `/invoices/{id}` | Full record: all fields, raw LLM output, retry count, missing fields |
+| `DELETE` | `/invoices/{id}` | Delete a record |
+
+```bash
+curl -F "file=@example_docs/Simple-Invoice-Template.png" -F "model_name=llava" \
+     http://localhost:8000/invoices/extract
+```
+
+### Data model
+The `invoices` table stores the fields people filter on as real columns (`vendor_name`, `invoice_number`,
+`currency`, `status`, plus `total_amount NUMERIC(14,2)` parsed from strings like `"$1,234.50"` or `"1.234,50 EUR"`).
+The full field set lives in a `JSONB` column. Values the model leaves as `N/A` are stored as `NULL`.
+
+Error handling: unsupported type → `415`, file over 10 MB → `413`, unreadable document → `422`,
+Ollama unreachable or model error → `502` (nothing is saved).
+
+### Tests
+```bash
+pytest -q
+```
+The tests replace the LLM with a fake and use in-memory SQLite, so they need neither Ollama nor PostgreSQL.
+
+---
+
 ## 📂 Project Structure
 
 ```
 Invoice_Extractor/
+├── api/                 # FastAPI app: routes (main.py), SQLAlchemy models, Pydantic schemas, DB session
+├── core/
+│   └── invoice_pipeline.py # Shared LangGraph self-correcting pipeline (no UI code)
+├── tests/               # pytest: pipeline helpers + API endpoints
+├── docker-compose.yml   # PostgreSQL + API + all Streamlit apps
 ├── .streamlit/
 │   └── config.toml      # Custom Slate Dark theme settings for Streamlit
 ├── example_docs/        # Sample PDFs, images, and statements for testing

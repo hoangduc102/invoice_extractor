@@ -1,10 +1,24 @@
+# UI + document processing
 streamlit
 docling
-python-dotenv
-langchain-core
-langchain-ollama
 pdf2image
 Pillow
 pandas
-langgraph
 rich
+
+# LLM / agent
+python-dotenv
+langchain-core
+langchain-ollama
+langgraph
+
+# REST API + database
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+SQLAlchemy>=2.0
+psycopg[binary]>=3.2
+
+# Tests
+pytest>=8.0
+httpx>=0.27
