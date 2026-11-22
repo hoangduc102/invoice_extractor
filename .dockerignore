@@ -1,0 +1,46 @@
+# Keep secrets and local machine state out of the image.
+# Runtime config comes from docker-compose `environment:` instead of .env.
+.env
+.env.*
+!.env.example
+
+# VCS / editors / AI tooling
+.git
+.gitignore
+.github
+.vscode
+.idea
+.claude
+.kilocode
+.roo
+.continue
+
+# Python environments and caches
+.venv
+venv
+env
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Local data: SQLite DBs, extraction history
+*.db
+*.sqlite3
+history.json
+
+# Not needed at runtime
+tests
+example_docs
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+AGENTS.md
+*.md
+!README.md
+
+# Personal files that live in this folder
+cv-detail.txt
