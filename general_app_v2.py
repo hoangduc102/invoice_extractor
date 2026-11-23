@@ -1,6 +1,7 @@
 """General document extractor with Docling or multimodal-only LLM modes."""
 
 from __future__ import annotations
+
 import base64
 import json
 import os
@@ -9,13 +10,15 @@ import tempfile
 from io import BytesIO
 from pathlib import Path
 from typing import Any, TypedDict
+
 import streamlit as st
 from docling.document_converter import DocumentConverter
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
-from pdf2image import convert_from_bytes
+
+from core.pdf import render_first_page
 
 load_dotenv()
 
@@ -23,13 +26,9 @@ load_dotenv()
 
 APP_TITLE = "General Document Extractor"
 DEFAULT_MODEL_NAME = "ministral-3:3b"
-OLLAMA_BASE_URL = os.getenv(
-    "OLLAMA_BASE_URL", "http://localhost:11434"
-)  # Fall back to local Ollama instance
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")  # Fall back to local Ollama instance
 SUPPORTED_UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "webp"]
-SCHEMA_PATH = Path(__file__).with_name(
-    "field_schema.json"
-)  # Schema file lives alongside this script
+SCHEMA_PATH = Path(__file__).with_name("field_schema.json")  # Schema file lives alongside this script
 
 # Define string constants for extraction mode identifiers
 MODE_DOCLING = "docling"
@@ -92,9 +91,7 @@ class ExtractionState(TypedDict, total=False):
 
 def normalize_name(name: str) -> str:
     # Strip non-alphanumeric characters and collapse repeated underscores for consistent key formatting
-    return re.sub(
-        r"_+", "_", re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower())
-    ).strip("_")
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower())).strip("_")
 
 
 def normalize_fields(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -126,9 +123,7 @@ def load_fields() -> list[dict[str, str]]:
 
 def save_fields(fields: list[dict[str, Any]]) -> None:
     # Normalize before saving to ensure the file always contains clean, consistent keys
-    SCHEMA_PATH.write_text(
-        json.dumps(normalize_fields(fields), indent=2), encoding="utf-8"
-    )
+    SCHEMA_PATH.write_text(json.dumps(normalize_fields(fields), indent=2), encoding="utf-8")
 
 
 ########################### Document Processing ###########################
@@ -149,9 +144,7 @@ def extract_text_with_docling(file_name: str, file_type: str, file_bytes: bytes)
         "image/jpg": ".jpg",
         "image/webp": ".webp",
     }
-    suffix = suffixes.get(
-        file_type, Path(file_name).suffix or ".bin"
-    )  # Fall back to original extension
+    suffix = suffixes.get(file_type, Path(file_name).suffix or ".bin")  # Fall back to original extension
 
     # Write bytes to a temp file because Docling requires a file-system path
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -166,9 +159,7 @@ def extract_text_with_docling(file_name: str, file_type: str, file_bytes: bytes)
 def to_base64_image(file_type: str, file_bytes: bytes) -> tuple[str, str]:
     # Rasterize the first PDF page to PNG so a vision model can consume it
     if file_type == "application/pdf":
-        image = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=200)[
-            0
-        ]  # 200 dpi balances quality and token size
+        image = render_first_page(file_bytes, dpi=200)  # 200 dpi balances quality and token size
         buf = BytesIO()
         image.save(buf, format="PNG")
         return "image/png", base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -187,10 +178,7 @@ def build_system_prompt(field_defs: list[dict[str, str]]) -> str:
         "Use null when a field is missing.",
         "Fields:",
     ]
-    lines.extend(
-        f"- {field['name']}: {field['description'] or 'No description provided.'}"
-        for field in field_defs
-    )
+    lines.extend(f"- {field['name']}: {field['description'] or 'No description provided.'}" for field in field_defs)
     return "\n".join(lines)
 
 
@@ -217,9 +205,7 @@ def parse_json_content(content: Any) -> tuple[str, dict[str, Any]]:
         raw = str(content).strip()
 
     # Strip markdown code fences that some models wrap around JSON output
-    cleaned = (
-        raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    )
+    cleaned = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return raw, json.loads(cleaned)
 
 
@@ -228,11 +214,7 @@ def parse_json_content(content: Any) -> tuple[str, dict[str, Any]]:
 
 def load_document_node(state: ExtractionState) -> ExtractionState:
     # Convert the uploaded file to markdown text for the downstream text-based LLM node
-    return {
-        "document_text": extract_text_with_docling(
-            state["file_name"], state["file_type"], state["file_bytes"]
-        )
-    }
+    return {"document_text": extract_text_with_docling(state["file_name"], state["file_type"], state["file_bytes"])}
 
 
 def extract_docling_node(state: ExtractionState) -> ExtractionState:
@@ -243,9 +225,7 @@ def extract_docling_node(state: ExtractionState) -> ExtractionState:
         format="json",
         base_url=OLLAMA_BASE_URL,
     )
-    prompt = (
-        f"Extract information from this document content.\n\n{state['document_text']}"
-    )
+    prompt = f"Extract information from this document content.\n\n{state['document_text']}"
     response = llm.invoke(
         [
             SystemMessage(content=build_system_prompt(state["field_defs"])),
@@ -296,9 +276,7 @@ def extract_multimodal_node(state: ExtractionState) -> ExtractionState:
 ########################### Extraction Workflow (LangGraph) ###########################
 
 
-def run_extraction(
-    file_name: str, file_type: str, file_bytes: bytes, model_name: str, mode: str
-) -> ExtractionState:
+def run_extraction(file_name: str, file_type: str, file_bytes: bytes, model_name: str, mode: str) -> ExtractionState:
     graph = StateGraph(ExtractionState)
 
     # Build a single-node graph for multimodal mode or a two-node pipeline for Docling mode
@@ -319,9 +297,7 @@ def run_extraction(
             "file_type": file_type,
             "file_bytes": file_bytes,
             "model_name": model_name,
-            "field_defs": st.session_state[
-                "field_defs"
-            ],  # Pull live field definitions from session state
+            "field_defs": st.session_state["field_defs"],  # Pull live field definitions from session state
             "mode": mode,
         }
     )
@@ -363,9 +339,7 @@ def render_extract_tab() -> None:
         st.subheader("Extraction Settings")
         model_name = st.text_input("Ollama model", value=DEFAULT_MODEL_NAME)
         mode_label = st.radio("Extraction method", list(MODE_OPTIONS))
-        uploaded_file = st.file_uploader(
-            "Upload invoice", type=SUPPORTED_UPLOAD_TYPES, key="upload_file"
-        )
+        uploaded_file = st.file_uploader("Upload invoice", type=SUPPORTED_UPLOAD_TYPES, key="upload_file")
     mode = MODE_OPTIONS[mode_label]
 
     # Exit early when no file has been uploaded yet to avoid downstream errors
@@ -394,16 +368,10 @@ def render_extract_tab() -> None:
 def render_fields_tab() -> None:
     st.write("Add or remove field names and descriptions used for extraction.")
 
-    edited = st.data_editor(
-        st.session_state["field_defs"], num_rows="dynamic", width="stretch"
-    )
+    edited = st.data_editor(st.session_state["field_defs"], num_rows="dynamic", width="stretch")
 
     # Handle both pandas DataFrames and plain list-of-dicts returned by the editor
-    rows = (
-        edited.to_dict("records")
-        if hasattr(edited, "to_dict")
-        else [dict(row) for row in edited]
-    )
+    rows = edited.to_dict("records") if hasattr(edited, "to_dict") else [dict(row) for row in edited]
     normalized = normalize_fields(rows)
 
     # Show the user exactly which keys will be sent to the LLM after normalization

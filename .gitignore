@@ -14,8 +14,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Python build output at the repo root only (must not match frontend/lib)
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -207,3 +208,6 @@ Plotly_Dash_Dashboards/01-Plotly_Basics_Charts/12-Sankey_Diagram/archive
 !/.github/
 # ignore all files with name dev at the start and any extension
 dev-*.*
+# Local databases / extraction history
+invoices.db
+history.json

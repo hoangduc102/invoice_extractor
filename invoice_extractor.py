@@ -1,5 +1,5 @@
 """
-Invoice Extractor app built with Streamlit + LangGraph + Ollama.
+Invoice Extractor app built with Streamlit + LangGraph + a vision LLM (Ollama or a cloud API).
 
 This file is organized for teaching:
 1) Configuration and constants
@@ -10,60 +10,29 @@ This file is organized for teaching:
 
 from __future__ import annotations
 
-import base64
-import io
 import json
-import os
-from typing import Any, TypedDict
+from typing import Any
 
 import streamlit as st
-from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
-from langchain_ollama import ChatOllama
-from langgraph.graph import END, START, StateGraph
-from pdf2image import convert_from_bytes
-from PIL import Image
 
-# Load local environment variables (for OLLAMA_BASE_URL, etc.).
-load_dotenv()
-
+from api.database import SessionLocal, init_db
+from api.repository import list_recent, save_extraction
+from core.invoice_pipeline import (
+    DEFAULT_MODEL_NAME,
+    DEFAULT_PROVIDER,
+    MISSING_VALUE,
+    InvoiceState,
+    build_graph,
+    file_to_base64_pages,
+    initial_state,
+)
+from core.llm import get_provider
+from core.pdf import render_first_page
 
 # ----------------------------- Configuration ---------------------------------
+# Extraction logic lives in core/invoice_pipeline.py (shared with the REST API).
 APP_TITLE = "Invoice Extractor"
-DEFAULT_MODEL_NAME = "llava"
-DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
 SUPPORTED_UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "webp"]
-MISSING_VALUE = "N/A"
-
-INVOICE_FIELDS = [
-    "INVOICE_NUMBER",
-    "DATE",
-    "DUE_DATE",
-    "VENDOR_NAME",
-    "VENDOR_ADDRESS",
-    "CUSTOMER_NAME",
-    "CUSTOMER_ADDRESS",
-    "SUBTOTAL",
-    "TAX",
-    "TOTAL",
-    "CURRENCY",
-    "PAYMENT_TERMS",
-    "LINE_ITEMS",
-    "NOTES",
-]
-CRITICAL_FIELDS = ["INVOICE_NUMBER", "VENDOR_NAME", "TOTAL", "DATE"]
-
-EXTRACTION_PROMPT = (
-    "You are an expert invoice data extractor. Analyze this invoice image and "
-    "extract ALL information. Return data in this EXACT format "
-    "(use 'N/A' if not found):\n\n"
-    "INVOICE_NUMBER: ...\nDATE: ...\nDUE_DATE: ...\nVENDOR_NAME: ...\n"
-    "VENDOR_ADDRESS: ...\nCUSTOMER_NAME: ...\nCUSTOMER_ADDRESS: ...\n"
-    "SUBTOTAL: ...\nTAX: ...\nTOTAL: ...\nCURRENCY: ...\n"
-    "PAYMENT_TERMS: ...\nLINE_ITEMS: item1 (qty x price) | item2 (qty x price) | ...\n"
-    "NOTES: ..."
-)
 
 CUSTOM_STYLES = """
 <style>
@@ -97,237 +66,50 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 """
 
 
-# ----------------------------- Workflow State --------------------------------
-class InvoiceState(TypedDict):
-    image_b64: str
-    model_name: str
-    raw_text: str
-    structured_data: dict[str, str]
-    retry_count: int
-    missing_fields: list[str]
-
-
-# ---------------------------- Pure Helper Logic -------------------------------
-def file_bytes_to_base64_png(file_bytes: bytes, mime_type: str) -> str:
-    """Convert a PDF (first page) or image upload into base64-encoded PNG."""
-    if mime_type == "application/pdf":
-        pages = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=200)
-        image = pages[0]
-    else:
-        image = Image.open(io.BytesIO(file_bytes))
-
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-
-def parse_invoice_fields(raw_text: str) -> dict[str, str]:
-    """
-    Parse key-value lines from model output.
-
-    Expected line format:
-    FIELD_NAME: value
-    """
-    fields: dict[str, str] = {}
-
-    for line in raw_text.strip().splitlines():
-        if ":" not in line:
-            continue
-        raw_key, raw_value = line.split(":", 1)
-        key = raw_key.strip().upper()
-        if key in INVOICE_FIELDS:
-            value = raw_value.strip() or MISSING_VALUE
-            fields[key] = value
-
-    for required_key in INVOICE_FIELDS:
-        fields.setdefault(required_key, MISSING_VALUE)
-
-    return fields
-
-
-def add_validation_message(fields: dict[str, str]) -> dict[str, str]:
-    """Attach a simple validation status based on critical fields."""
-    missing = [key for key in CRITICAL_FIELDS if fields.get(key, MISSING_VALUE) == MISSING_VALUE]
-    validation_msg = (
-        "All critical fields found"
-        if not missing
-        else f"Missing critical fields: {', '.join(missing)}"
-    )
-    validated = dict(fields)
-    validated["_VALIDATION"] = validation_msg
-    return validated
-
-
-def normalize_model_output(content: Any) -> str:
-    """Normalize LangChain response content to plain text."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-            else:
-                parts.append(str(item))
-        return "\n".join(parts)
-    return str(content)
-
-
 # ----------------------------- History Logic ---------------------------------
-HISTORY_FILE = "history.json"
-
-
-def load_history() -> list[dict[str, Any]]:
-    """Load extraction history from local JSON file."""
-    if not os.path.exists(HISTORY_FILE):
-        return []
-    try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-
-def save_to_history(data: dict[str, Any]) -> None:
-    """Append a successful extraction to history.json, skipping duplicates."""
-    from datetime import datetime
-    history = load_history()
-    
-    # Build the clean data payload (without internal metadata)
-    clean_data = {k: v for k, v in data.items() if k != "_VALIDATION"}
-    
-    # Skip saving if the last history entry has identical extracted data
-    if history and history[-1].get("full_data") == clean_data:
-        return
-    
-    record = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "vendor_name": data.get("VENDOR_NAME", MISSING_VALUE),
-        "invoice_number": data.get("INVOICE_NUMBER", MISSING_VALUE),
-        "date": data.get("DATE", MISSING_VALUE),
-        "total": data.get("TOTAL", MISSING_VALUE),
-        "currency": data.get("CURRENCY", MISSING_VALUE),
-        "full_data": clean_data,
-    }
-    history.append(record)
-    try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-
-
-# ---------------------------- LangGraph Nodes ---------------------------------
-def extract_text_node(state: InvoiceState) -> dict[str, str]:
-    """Step 1: Send invoice image to Ollama vision model."""
-    llm = ChatOllama(
-        model=state["model_name"],
-        temperature=0,
-        base_url=OLLAMA_BASE_URL,
-    )
-
-    message = HumanMessage(
-        content=[
-            {"type": "text", "text": EXTRACTION_PROMPT},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{state['image_b64']}"},
-            },
-        ]
-    )
-
-    response = llm.invoke([message])
-    return {"raw_text": normalize_model_output(response.content)}
-
-
-def parse_fields_node(state: InvoiceState) -> dict[str, dict[str, str]]:
-    """Step 2: Convert model text output into a structured dictionary."""
-    return {"structured_data": parse_invoice_fields(state["raw_text"])}
-
-
-def validate_output_node(state: InvoiceState) -> dict[str, Any]:
-    """Step 3: Validate extracted fields and flag missing critical data."""
-    validated = add_validation_message(state["structured_data"])
-    missing = [key for key in CRITICAL_FIELDS if validated.get(key, MISSING_VALUE) == MISSING_VALUE]
-    return {
-        "structured_data": validated,
-        "missing_fields": missing,
-    }
-
-
-def should_retry(state: InvoiceState) -> str:
-    """Route to correct_extraction if critical fields are missing and retry limit not reached."""
-    missing = state.get("missing_fields", [])
-    retry_count = state.get("retry_count", 0)
-    if missing and retry_count < 2:
-        return "correct_extraction"
-    return "end"
-
-
-def correct_extraction_node(state: InvoiceState) -> dict[str, Any]:
-    """Step 4: Prompt the LLM again, instructing it to find the missing fields."""
-    llm = ChatOllama(
-        model=state["model_name"],
-        temperature=0,
-        base_url=OLLAMA_BASE_URL,
-    )
-    
-    missing_fields_str = ", ".join(state["missing_fields"])
-    correction_prompt = (
-        f"You are an expert invoice data extractor. In your previous attempt, you missed these critical fields: {missing_fields_str}.\n"
-        "Please analyze this invoice image carefully again and extract all information. Especially, make sure to find the missing fields.\n"
-        "Return data in this EXACT format (use 'N/A' if not found):\n\n"
-        "INVOICE_NUMBER: ...\nDATE: ...\nDUE_DATE: ...\nVENDOR_NAME: ...\n"
-        "VENDOR_ADDRESS: ...\nCUSTOMER_NAME: ...\nCUSTOMER_ADDRESS: ...\n"
-        "SUBTOTAL: ...\nTAX: ...\nTOTAL: ...\nCURRENCY: ...\n"
-        "PAYMENT_TERMS: ...\nLINE_ITEMS: item1 (qty x price) | item2 (qty x price) | ...\n"
-        "NOTES: ..."
-    )
-    
-    message = HumanMessage(
-        content=[
-            {"type": "text", "text": correction_prompt},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{state['image_b64']}"},
-            },
-        ]
-    )
-    
-    response = llm.invoke([message])
-    current_retry = state.get("retry_count", 0)
-    return {
-        "raw_text": normalize_model_output(response.content),
-        "retry_count": current_retry + 1,
-    }
-
-
+# History is stored in the same database as the REST API (DATABASE_URL in .env):
+# PostgreSQL in Docker, a local SQLite file otherwise.
 @st.cache_resource
-def build_graph():
-    """Create and cache the LangGraph pipeline once per app session."""
-    graph = StateGraph(InvoiceState)
-    graph.add_node("extract_text", extract_text_node)
-    graph.add_node("parse_fields", parse_fields_node)
-    graph.add_node("validate_output", validate_output_node)
-    graph.add_node("correct_extraction", correct_extraction_node)
+def _ensure_db() -> bool:
+    init_db()
+    return True
 
-    graph.add_edge(START, "extract_text")
-    graph.add_edge("extract_text", "parse_fields")
-    graph.add_edge("parse_fields", "validate_output")
-    
-    graph.add_conditional_edges(
-        "validate_output",
-        should_retry,
+
+def load_history(limit: int = 100) -> list[dict[str, Any]]:
+    """Most recent extractions, newest first."""
+    _ensure_db()
+    with SessionLocal() as db:
+        rows = list_recent(db, limit=limit)
+    return [
         {
-            "correct_extraction": "correct_extraction",
-            "end": END
+            "id": row.id,
+            "timestamp": row.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "vendor_name": row.vendor_name or MISSING_VALUE,
+            "invoice_number": row.invoice_number or MISSING_VALUE,
+            "date": row.invoice_date or MISSING_VALUE,
+            "total": row.total_raw or MISSING_VALUE,
+            "currency": row.currency or MISSING_VALUE,
+            "full_data": row.fields,
         }
-    )
-    graph.add_edge("correct_extraction", "parse_fields")
+        for row in rows
+    ]
 
-    return graph.compile()
+
+def save_to_history(result: InvoiceState, filename: str, mime_type: str) -> None:
+    """Persist an extraction, skipping it if identical to the latest row."""
+    _ensure_db()
+    try:
+        with SessionLocal() as db:
+            save_extraction(
+                db,
+                result,
+                filename=filename,
+                content_type=mime_type,
+                model_name=f"{result['provider']}/{result['model_name']}",
+                skip_if_duplicate=True,
+            )
+    except Exception as exc:  # keep the UI usable if the DB is down
+        st.warning(f"Could not save to history database: {exc}")
 
 
 # ------------------------------- UI Helpers ----------------------------------
@@ -357,35 +139,30 @@ def render_field_pair(data: dict[str, str], left_key: str, right_key: str) -> No
 
 def render_invoice_preview(file_bytes: bytes, mime_type: str) -> None:
     if mime_type == "application/pdf":
-        pages = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=150)
-        st.image(pages[0], caption="Invoice Preview (Page 1)")
+        st.image(render_first_page(file_bytes, dpi=150), caption="Invoice Preview (Page 1)")
         return
     st.image(file_bytes, caption="Invoice Preview")
 
 
-def process_invoice(file_bytes: bytes, mime_type: str, model_name: str, status: Any) -> InvoiceState:
+def process_invoice(
+    file_bytes: bytes, mime_type: str, model_name: str, status: Any, filename: str = "upload"
+) -> InvoiceState:
     """Run the end-to-end extraction flow and return final graph state."""
-    status.write("Converting uploaded document to image...")
-    image_b64 = file_bytes_to_base64_png(file_bytes, mime_type)
+    status.write("Converting uploaded document to images...")
+    pages = file_to_base64_pages(file_bytes, mime_type)
+    status.write(f"Prepared {len(pages)} page image(s).")
 
     status.write(f"Initializing LangGraph pipeline with model: {model_name}")
     pipeline = build_graph()
 
-    initial_state: InvoiceState = {
-        "image_b64": image_b64,
-        "model_name": model_name,
-        "raw_text": "",
-        "structured_data": {},
-        "retry_count": 0,
-        "missing_fields": [],
-    }
-    
-    result = dict(initial_state)
-    for event in pipeline.stream(initial_state):
+    start_state = initial_state(pages, model_name)
+
+    result = dict(start_state)
+    for event in pipeline.stream(start_state):
         for node_name, state_update in event.items():
             result.update(state_update)
             if node_name == "extract_text":
-                status.write("Sent invoice to vision model and received raw text.")
+                status.write("Sent invoice pages to the vision model and received raw text.")
             elif node_name == "parse_fields":
                 status.write("Parsed raw text into structured fields.")
             elif node_name == "validate_output":
@@ -395,11 +172,13 @@ def process_invoice(file_bytes: bytes, mime_type: str, model_name: str, status: 
                 else:
                     status.write("Validation successful: All critical fields found.")
             elif node_name == "correct_extraction":
-                status.write("[Self-Correction] Critical fields missing. Re-submitting to LLM to focus on missing data...")
+                status.write(
+                    "[Self-Correction] Critical fields missing. Re-submitting to LLM to focus on missing data..."
+                )
 
     status.update(label="Extraction complete", state="complete")
     if result.get("structured_data"):
-        save_to_history(result["structured_data"])
+        save_to_history(result, filename, mime_type)
     return result
 
 
@@ -415,7 +194,7 @@ def render_results(result: InvoiceState) -> None:
 
     key_metrics = ["INVOICE_NUMBER", "DATE", "TOTAL", "CURRENCY"]
     metric_cols = st.columns(len(key_metrics))
-    for col, key in zip(metric_cols, key_metrics):
+    for col, key in zip(metric_cols, key_metrics, strict=True):
         with col:
             render_field_card(key, data.get(key, MISSING_VALUE))
 
@@ -452,16 +231,17 @@ def main() -> None:
 
     with st.sidebar:
         st.subheader("Configuration")
+        st.caption(f"Provider: **{get_provider(DEFAULT_PROVIDER).label}** (set `LLM_PROVIDER` in `.env`)")
         model_name = st.text_input(
-            "Ollama Model",
+            "Model",
             value=DEFAULT_MODEL_NAME,
-            help="Vision-capable model name (for example: llava, llava:13b, bakllava).",
+            help="Vision-capable model, e.g. llava (Ollama), gemini-3.5-flash-lite, gpt-4.1-mini, claude-haiku-5-5.",
         )
 
     tab1, tab2 = st.tabs(["Extract Invoice", "Extraction History"])
 
     with tab1:
-        st.write("Upload a PDF or image invoice to extract structured fields with a local Ollama model.")
+        st.write("Upload a PDF or image invoice to extract structured fields with a vision LLM.")
         st.markdown("---")
         upload_col, preview_col = st.columns([1, 1])
         with upload_col:
@@ -486,6 +266,7 @@ def main() -> None:
                         mime_type=uploaded_file.type,
                         model_name=model_name,
                         status=status,
+                        filename=uploaded_file.name,
                     )
 
             if "result" in st.session_state:
@@ -500,18 +281,20 @@ def main() -> None:
             import pandas as pd
 
             # Show history newest-first
-            reversed_history = list(reversed(history))
+            reversed_history = history  # already newest first
             history_data = []
             for idx, item in enumerate(reversed_history):
-                history_data.append({
-                    "No.": idx + 1,
-                    "Timestamp": item.get("timestamp"),
-                    "Vendor Name": item.get("vendor_name"),
-                    "Invoice Number": item.get("invoice_number"),
-                    "Date": item.get("date"),
-                    "Total": item.get("total"),
-                    "Currency": item.get("currency"),
-                })
+                history_data.append(
+                    {
+                        "No.": idx + 1,
+                        "Timestamp": item.get("timestamp"),
+                        "Vendor Name": item.get("vendor_name"),
+                        "Invoice Number": item.get("invoice_number"),
+                        "Date": item.get("date"),
+                        "Total": item.get("total"),
+                        "Currency": item.get("currency"),
+                    }
+                )
             df = pd.DataFrame(history_data)
             st.dataframe(df, use_container_width=True, hide_index=True)
 

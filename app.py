@@ -87,6 +87,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     page_texts = [page.extract_text() or "" for page in reader.pages]
     return "\n\n".join(page_texts)
 
+
 def build_pdf_extraction_prompt(invoice_text: str) -> str:
     """Create the prompt used when a PDF has already been converted to text."""
     return f"Extract all invoice information from this invoice text.\n\n{invoice_text}"
@@ -114,6 +115,7 @@ def load_document_node(state: InvoiceState) -> InvoiceState:
     if is_pdf(state["file_type"]):
         return {"invoice_text": extract_text_from_pdf(state["file_bytes"])}
     return {"invoice_text": ""}
+
 
 def extract_invoice_node(state: InvoiceState) -> InvoiceState:
     """Node 2: Send document content to Ollama and parse JSON response."""
@@ -158,8 +160,6 @@ def extract_invoice_node(state: InvoiceState) -> InvoiceState:
     return {"raw_response": raw_response, "extracted_fields": extracted_fields}
 
 
-
-
 # ================================ Graph Builder ============================== #
 @st.cache_resource
 def build_invoice_graph():
@@ -175,6 +175,7 @@ def build_invoice_graph():
     graph.add_edge("extract_invoice", END)
     return graph.compile()
 
+
 def run_extraction(file_name: str, file_type: str, file_bytes: bytes, model_name: str) -> InvoiceState:
     """Run the full extraction workflow and return final graph state."""
     # Keep workflow execution in one function so the UI layer stays focused on UX.
@@ -189,7 +190,6 @@ def run_extraction(file_name: str, file_type: str, file_bytes: bytes, model_name
     )
 
 
-
 # ================================ UI Helpers ================================= #
 def render_file_preview(file_type: str, file_name: str, file_bytes: bytes) -> None:
     """Render a preview for image or PDF uploads."""
@@ -201,11 +201,9 @@ def render_file_preview(file_type: str, file_name: str, file_bytes: bytes) -> No
     if is_pdf(file_type):
         pdf_b64 = base64.b64encode(file_bytes).decode("utf-8")
         pdf_preview = (
-            f'<embed src="data:application/pdf;base64,{pdf_b64}" '
-            'width="100%" height="700" type="application/pdf">'
+            f'<embed src="data:application/pdf;base64,{pdf_b64}" width="100%" height="700" type="application/pdf">'
         )
         st.markdown(pdf_preview, unsafe_allow_html=True)
-
 
 
 def render_results(result: InvoiceState, file_type: str) -> None:
@@ -217,14 +215,11 @@ def render_results(result: InvoiceState, file_type: str) -> None:
 
     with st.expander("Raw model output"):
         st.code(result.get("raw_response", ""), language="json")
-        
+
     # For PDFs, show the extracted text in a collapsible section. Don't show for images since we didn't extract text in that case.
     if is_pdf(file_type):
         with st.expander("Extracted PDF text"):
             st.text(result.get("invoice_text", ""))
-
-
-
 
 
 # =================================== App ==================================== #
@@ -237,7 +232,7 @@ def main() -> None:
     # Step 2: Collect user inputs.
     model_name = st.text_input("Ollama model", value=DEFAULT_MODEL_NAME)
     uploaded_file = st.file_uploader("Upload invoice", type=SUPPORTED_UPLOAD_TYPES)
-    
+
     # Don't proceed until a file is uploaded.
     if not uploaded_file:
         return

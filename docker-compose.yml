@@ -1,0 +1,159 @@
+# Docker Compose for Invoice Extractor Suite
+# Runs all 5 apps on different ports
+#
+# Usage:
+#   docker compose up --build          (chạy tất cả)
+#   docker compose up invoice_extractor --build  (chạy 1 app)
+#
+# Yêu cầu: Ollama phải chạy trên host machine (ollama serve)
+
+services:
+
+  # PostgreSQL - lưu kết quả trích xuất của API
+  db:
+    image: postgres:16-alpine
+    container_name: invoice_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-invoice}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-invoice}
+      POSTGRES_DB: ${POSTGRES_DB:-invoices}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # REST API (FastAPI) - http://localhost:8000/docs
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: invoice_api
+    entrypoint: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-invoice}:${POSTGRES_PASSWORD:-invoice}@db:5432/${POSTGRES_DB:-invoices}
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CORS_ORIGINS=http://localhost:3000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # cần cho Linux; Docker Desktop đã có sẵn
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Next.js frontend - http://localhost:3000
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000  # URL trình duyệt dùng để gọi API
+    container_name: invoice_web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # App chính - Self-correcting Invoice Extractor
+  # http://localhost:8501
+  invoice_extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: invoice_extractor
+    environment:
+      - APP_FILE=invoice_extractor.py
+      - PORT=8501
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-invoice}:${POSTGRES_PASSWORD:-invoice}@db:5432/${POSTGRES_DB:-invoices}
+    ports:
+      - "8501:8501"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # General Document Extractor (dynamic schema + CSV)
+  # http://localhost:8502
+  extractor_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: extractor_app
+    environment:
+      - APP_FILE=extractor_app.py
+      - PORT=8502
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    ports:
+      - "8502:8502"
+    restart: unless-stopped
+
+  # Docling + Multimodal Invoice Extractor
+  # http://localhost:8503
+  docling_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: docling_app
+    environment:
+      - APP_FILE=docling_app.py
+      - PORT=8503
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    ports:
+      - "8503:8503"
+    restart: unless-stopped
+
+  # LangGraph General Extractor
+  # http://localhost:8504
+  general_app_v2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: general_app_v2
+    environment:
+      - APP_FILE=general_app_v2.py
+      - PORT=8504
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    ports:
+      - "8504:8504"
+    restart: unless-stopped
+
+  # Basic Invoice Extractor (LangGraph + PyPDF)
+  # http://localhost:8505
+  basic_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: basic_app
+    environment:
+      - APP_FILE=app.py
+      - PORT=8505
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    ports:
+      - "8505:8505"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

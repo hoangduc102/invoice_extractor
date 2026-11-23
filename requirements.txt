@@ -1,10 +1,27 @@
+# UI + document processing
 streamlit
 docling
+pypdfium2>=4.30   # PDF -> image; bundles PDFium, no Poppler needed
+Pillow
+pandas
+rich
+
+# LLM / agent
 python-dotenv
 langchain-core
 langchain-ollama
-pdf2image
-Pillow
-pandas
+langchain-google-genai   # LLM_PROVIDER=gemini
+langchain-openai         # LLM_PROVIDER=openai
+langchain-anthropic      # LLM_PROVIDER=anthropic
 langgraph
-rich
+
+# REST API + database
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+SQLAlchemy>=2.0
+psycopg[binary]>=3.2
+
+# Tests
+pytest>=8.0
+httpx>=0.27

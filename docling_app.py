@@ -1,4 +1,5 @@
 """Invoice Extractor app using Docling + LangChain + Ollama + LangGraph."""
+
 import base64
 import json
 import os
@@ -13,9 +14,10 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
-from pdf2image import convert_from_bytes
 
- ###################### Configuration ####################### 
+from core.pdf import iter_pdf_pages
+
+###################### Configuration #######################
 
 # Load environment variables from .env file
 load_dotenv()
@@ -57,19 +59,21 @@ Use null when a field is missing."""
 
 ########################### State Definition ################################
 
+
 # Define the typed dictionary that flows through each LangGraph node
 class InvoiceState(TypedDict, total=False):
     file_name: str
     file_type: str
     file_bytes: bytes
     model_name: str
-    extraction_mode: str # either "docling" or "multimodal" 
+    extraction_mode: str  # either "docling" or "multimodal"
     invoice_text: str
     raw_response: str
     extracted_fields: dict[str, Any]
 
 
 ###################### Helper Functions ########################
+
 
 @st.cache_resource
 def get_docling_converter() -> Any:
@@ -102,12 +106,13 @@ def extract_text_with_docling(file_name: str, file_type: str, file_bytes: bytes)
 
     return result.document.export_to_markdown().strip()
 
+
 def to_base64_images(file_type: str, file_bytes: bytes) -> list[tuple[str, str]]:
     """Encode file bytes as one or more base64 images for the multimodal LLM."""
     # Render every PDF page to PNG so the model can read full multi-page documents
     if file_type == "application/pdf":
         encoded_pages: list[tuple[str, str]] = []
-        for image in convert_from_bytes(file_bytes, dpi=200):
+        for image in iter_pdf_pages(file_bytes, dpi=200):
             buffer = BytesIO()
             image.save(buffer, format="PNG")
             encoded_pages.append(("image/png", base64.b64encode(buffer.getvalue()).decode("utf-8")))
@@ -115,6 +120,7 @@ def to_base64_images(file_type: str, file_bytes: bytes) -> list[tuple[str, str]]
 
     # For non-PDF images, encode the raw bytes directly
     return [(file_type, base64.b64encode(file_bytes).decode("utf-8"))]
+
 
 def build_multimodal_content(file_type: str, file_bytes: bytes) -> list[dict[str, Any]]:
     """Build the multimodal message content using all pages for PDF inputs."""
@@ -191,7 +197,6 @@ def load_document_node(state: InvoiceState) -> InvoiceState:
     }
 
 
-
 def extract_invoice_node(state: InvoiceState) -> InvoiceState:
     """Send the document to the LLM and parse structured invoice fields."""
     # Initialize the Ollama chat model with JSON output format
@@ -258,8 +263,8 @@ def run_extraction(
     )
 
 
-
 ##################### UI Rendering ##########################
+
 
 def render_file_preview(file_type: str, file_name: str, file_bytes: bytes) -> None:
     """Display a preview of the uploaded file in the Streamlit app."""
@@ -276,7 +281,6 @@ def render_file_preview(file_type: str, file_name: str, file_bytes: bytes) -> No
         )
 
 
-
 def render_results(result: InvoiceState, extraction_mode: str) -> None:
     """Display the extraction results and optional debug expandables."""
     st.subheader("Extracted Invoice JSON")
@@ -289,6 +293,7 @@ def render_results(result: InvoiceState, extraction_mode: str) -> None:
     if extraction_mode == MODE_DOCLING:
         with st.expander("Docling extracted text"):
             st.text(result.get("invoice_text", ""))
+
 
 ####################### Main App #######################
 
