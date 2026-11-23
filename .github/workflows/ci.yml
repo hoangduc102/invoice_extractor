@@ -78,5 +78,6 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run lint
-      - run: npx tsc --noEmit
+      - name: Type-check
+        run: npx next typegen && npx tsc --noEmit  # typegen creates LayoutProps & route types in .next/
       - run: npm run build
