@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from api.main import DEFAULT_PROVIDER
+from core.llm import LLMConfigError
+
 PNG = ("invoice.png", b"\x89PNG fake bytes", "image/png")
 
 
@@ -23,7 +26,7 @@ def test_extract_persists_and_returns_invoice(client, fake_extractor):
     assert body["total_raw"] == "$1,234.50"
     assert body["total_amount"] == "1234.50"
     assert body["status"] == "complete"
-    assert body["model_name"] == "qwen3-vl:2b"
+    assert body["model_name"] == f"{DEFAULT_PROVIDER}/qwen3-vl:2b"  # provider recorded with the model
     assert "_VALIDATION" not in body["fields"]
     assert fake_extractor.calls == [(b"\x89PNG fake bytes", "image/png", "qwen3-vl:2b")]
 
@@ -126,3 +129,27 @@ def test_delete(client):
     invoice_id = upload(client).json()["id"]
     assert client.delete(f"/invoices/{invoice_id}").status_code == 204
     assert client.get(f"/invoices/{invoice_id}").status_code == 404
+
+
+def test_config_reports_backend(client):
+    body = client.get("/config").json()
+    assert body["provider"] == DEFAULT_PROVIDER
+    assert body["default_model"]
+
+
+def test_missing_api_key_returns_503(client, fake_extractor):
+    fake_extractor.error = LLMConfigError("GOOGLE_API_KEY is not set. Add it to .env to use LLM_PROVIDER=gemini.")
+    resp = upload(client)
+    assert resp.status_code == 503
+    assert "GOOGLE_API_KEY" in resp.json()["detail"]
+
+
+def test_corrupt_pdf_returns_422_without_calling_the_llm(client):
+    """Real pipeline (no fake): PDF rendering fails before any model call."""
+    from api.main import app, get_extractor
+    from core.invoice_pipeline import run_extraction
+
+    app.dependency_overrides[get_extractor] = lambda: run_extraction
+    resp = upload(client, file=("broken.pdf", b"%PDF-1.4 truncated", "application/pdf"))
+    assert resp.status_code == 422
+    assert "valid PDF or image" in resp.json()["detail"]

@@ -24,7 +24,9 @@ from api.database import get_db, init_db
 from api.models import Invoice
 from api.repository import save_extraction
 from api.schemas import InvoiceDetail, InvoiceList, Stats, VendorStats
-from core.invoice_pipeline import DEFAULT_MODEL_NAME, OLLAMA_BASE_URL, run_extraction
+from core.invoice_pipeline import DEFAULT_MODEL_NAME, DEFAULT_PROVIDER, run_extraction
+from core.llm import LLMConfigError, backend_hint, get_provider
+from core.pdf import InvalidDocumentError
 
 logger = logging.getLogger("invoice_api")
 
@@ -83,6 +85,13 @@ def _get_invoice_or_404(db: Session, invoice_id: int) -> Invoice:
 
 
 # --------------------------------- Routes -----------------------------------
+@app.get("/config", tags=["meta"])
+def config() -> dict[str, str]:
+    """Which LLM backend this server uses (set by LLM_PROVIDER / LLM_MODEL)."""
+    provider = get_provider(DEFAULT_PROVIDER)
+    return {"provider": provider.name, "provider_label": provider.label, "default_model": DEFAULT_MODEL_NAME}
+
+
 @app.get("/health", tags=["meta"])
 def health(db: Annotated[Session, Depends(get_db)]) -> dict[str, str]:
     db.execute(select(1))
@@ -112,21 +121,27 @@ def extract_invoice(
     if not data:
         raise HTTPException(422, "Uploaded file is empty")
 
+    model_name = model_name.strip() or DEFAULT_MODEL_NAME
     try:
         result = extractor(data, content_type, model_name)
-    except (UnidentifiedImageError, ValueError) as exc:
+    except (UnidentifiedImageError, InvalidDocumentError) as exc:
         logger.info("Unreadable upload %s: %s", file.filename, exc)
         raise HTTPException(422, "Could not read the document. Is it a valid PDF or image?") from exc
-    except Exception as exc:  # LLM backend down, model not pulled, timeout, ...
+    except LLMConfigError as exc:  # missing API key / package, unknown provider
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    except Exception as exc:  # backend down, model not found, rate limited, timeout, ...
         logger.exception("Extraction failed")
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
-            f"Extraction backend error ({type(exc).__name__}). Check that Ollama is running at "
-            f"{OLLAMA_BASE_URL} and the model '{model_name}' is pulled.",
+            f"Extraction backend error ({type(exc).__name__}). {backend_hint(DEFAULT_PROVIDER, model_name)}",
         ) from exc
 
     return save_extraction(
-        db, result, filename=file.filename or "upload", content_type=content_type, model_name=model_name
+        db,
+        result,
+        filename=file.filename or "upload",
+        content_type=content_type,
+        model_name=f"{DEFAULT_PROVIDER}/{model_name}",
     )
 
 

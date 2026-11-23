@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
-from pdf2image import convert_from_bytes
+
+from core.pdf import iter_pdf_pages
 
 ###################### Configuration #######################
 
@@ -111,7 +112,7 @@ def to_base64_images(file_type: str, file_bytes: bytes) -> list[tuple[str, str]]
     # Render every PDF page to PNG so the model can read full multi-page documents
     if file_type == "application/pdf":
         encoded_pages: list[tuple[str, str]] = []
-        for image in convert_from_bytes(file_bytes, dpi=200):
+        for image in iter_pdf_pages(file_bytes, dpi=200):
             buffer = BytesIO()
             image.save(buffer, format="PNG")
             encoded_pages.append(("image/png", base64.b64encode(buffer.getvalue()).decode("utf-8")))

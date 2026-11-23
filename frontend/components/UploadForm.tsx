@@ -1,8 +1,8 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { ApiError, extractInvoice, type InvoiceDetail } from "@/lib/api";
+import { ApiError, extractInvoice, getConfig, type BackendConfig, type InvoiceDetail } from "@/lib/api";
 
 const ACCEPT = ".pdf,.png,.jpg,.jpeg,.webp";
 const MAX_BYTES = 10 * 1024 * 1024;
@@ -10,10 +10,17 @@ const MAX_BYTES = 10 * 1024 * 1024;
 export function UploadForm({ onExtracted }: { onExtracted: (invoice: InvoiceDetail) => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
-  const [model, setModel] = useState("llava");
+  const [model, setModel] = useState(""); // empty = server default
+  const [backend, setBackend] = useState<BackendConfig | null>(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getConfig()
+      .then(setBackend)
+      .catch(() => {}); // the table already shows a connection error
+  }, []);
 
   function pick(f: File | undefined) {
     setError(null);
@@ -77,11 +84,13 @@ export function UploadForm({ onExtracted }: { onExtracted: (invoice: InvoiceDeta
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <label className="flex-1 text-sm">
-          <span className="mb-1 block text-zinc-600 dark:text-zinc-400">Ollama vision model</span>
+          <span className="mb-1 block text-zinc-600 dark:text-zinc-400">
+            Model{backend && <> · {backend.provider_label}</>}
+          </span>
           <input
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder="llava"
+            placeholder={backend ? `${backend.default_model} (default)` : "server default"}
             className="w-full rounded-lg border border-zinc-300 bg-transparent px-3 py-2 dark:border-zinc-700"
           />
         </label>
@@ -96,7 +105,8 @@ export function UploadForm({ onExtracted }: { onExtracted: (invoice: InvoiceDeta
 
       {busy && (
         <p className="text-xs text-zinc-500">
-          Running the self-correcting LangGraph pipeline. Local vision models can take 30–90 s per page.
+          Running the self-correcting LangGraph pipeline.{" "}
+          {backend?.provider === "ollama" ? "Local models can take 30–90 s per page." : "Usually a few seconds."}
         </p>
       )}
       {error && (

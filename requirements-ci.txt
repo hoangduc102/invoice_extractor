@@ -7,8 +7,11 @@ psycopg[binary]>=3.2
 python-dotenv
 langchain-core
 langchain-ollama
+langchain-google-genai
+langchain-openai
+langchain-anthropic
 langgraph
-pdf2image
+pypdfium2>=4.30
 Pillow
 pandas
 streamlit

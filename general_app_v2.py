@@ -17,7 +17,8 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
-from pdf2image import convert_from_bytes
+
+from core.pdf import render_first_page
 
 load_dotenv()
 
@@ -158,9 +159,7 @@ def extract_text_with_docling(file_name: str, file_type: str, file_bytes: bytes)
 def to_base64_image(file_type: str, file_bytes: bytes) -> tuple[str, str]:
     # Rasterize the first PDF page to PNG so a vision model can consume it
     if file_type == "application/pdf":
-        image = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=200)[
-            0
-        ]  # 200 dpi balances quality and token size
+        image = render_first_page(file_bytes, dpi=200)  # 200 dpi balances quality and token size
         buf = BytesIO()
         image.save(buf, format="PNG")
         return "image/png", base64.b64encode(buf.getvalue()).decode("utf-8")

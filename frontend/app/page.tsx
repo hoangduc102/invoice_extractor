@@ -91,7 +91,7 @@ export default function Home() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Invoice Extractor</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            Local vision LLM + LangGraph self-correction · API <code className="text-xs">{API_URL}</code>
+            Vision LLM + LangGraph self-correction · API <code className="text-xs">{API_URL}</code>
           </p>
         </div>
         {stats && (

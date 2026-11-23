@@ -1,7 +1,7 @@
 # UI + document processing
 streamlit
 docling
-pdf2image
+pypdfium2>=4.30   # PDF -> image; bundles PDFium, no Poppler needed
 Pillow
 pandas
 rich
@@ -10,6 +10,9 @@ rich
 python-dotenv
 langchain-core
 langchain-ollama
+langchain-google-genai   # LLM_PROVIDER=gemini
+langchain-openai         # LLM_PROVIDER=openai
+langchain-anthropic      # LLM_PROVIDER=anthropic
 langgraph
 
 # REST API + database

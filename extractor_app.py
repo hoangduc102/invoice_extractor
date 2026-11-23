@@ -16,7 +16,8 @@ from docling.document_converter import DocumentConverter
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from pdf2image import convert_from_bytes
+
+from core.pdf import iter_pdf_pages
 
 load_dotenv()
 
@@ -168,7 +169,7 @@ def to_base64_images(file_type: str, file_bytes: bytes) -> list[tuple[str, str]]
         # Convert each PDF page to a base64-encoded PNG image
         encoded_pages: list[tuple[str, str]] = []
         # Use 200 dpi to balance quality and token size for LLM input
-        for image in convert_from_bytes(file_bytes, dpi=200):  # 200 dpi balances quality and token size
+        for image in iter_pdf_pages(file_bytes, dpi=200):  # 200 dpi balances quality and token size
             # Encode each page image as base64 PNG
             buf = BytesIO()
             image.save(buf, format="PNG")

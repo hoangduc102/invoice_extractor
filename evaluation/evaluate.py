@@ -1,8 +1,9 @@
 """
 Measure extraction accuracy against hand-labelled ground truth.
 
-    python -m evaluation.evaluate --model llava
-    python -m evaluation.evaluate --model llava --model qwen3-vl:2b --runs 3 --update-readme
+    python -m evaluation.evaluate                                   # LLM_PROVIDER / LLM_MODEL from .env
+    python -m evaluation.evaluate --model gemini/gemini-3.5-flash-lite --runs 3 --delay 4 --update-readme
+    python -m evaluation.evaluate --model ollama/llava --model openai/gpt-4.1-mini   # compare side by side
     python -m evaluation.evaluate --rescore evaluation/results/llava-20261122-1530.json
 
 For every document it records the FIRST-pass extraction and the FINAL result after the
@@ -41,14 +42,28 @@ def load_ground_truth() -> dict[str, Any]:
 
 
 # ------------------------------- Running ------------------------------------
-def extract_with_trace(path: Path, model: str) -> dict[str, Any]:
+def parse_model_spec(spec: str | None) -> tuple[str, str]:
+    """'gemini/gemini-3.5-flash-lite' -> ('gemini', ...); a bare name uses LLM_PROVIDER.
+
+    Only a known provider prefix is split off, so Ollama tags like 'qwen3-vl:2b' stay intact.
+    """
+    from core.llm import PROVIDERS, default_model, get_provider
+
+    if spec and "/" in spec and spec.split("/", 1)[0] in PROVIDERS:
+        provider, model = spec.split("/", 1)
+        return provider, model
+    provider = get_provider().name
+    return provider, spec or default_model(provider)
+
+
+def extract_with_trace(path: Path, provider: str, model: str) -> dict[str, Any]:
     """Run the graph on one file, keeping first-pass and final fields."""
-    from core.invoice_pipeline import build_graph, file_bytes_to_base64_png, initial_state
+    from core.invoice_pipeline import build_graph, file_to_base64_pages, initial_state
 
     mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     started = time.perf_counter()
-    image_b64 = file_bytes_to_base64_png(path.read_bytes(), mime)
-    state: dict[str, Any] = dict(initial_state(image_b64, model))
+    pages = file_to_base64_pages(path.read_bytes(), mime)
+    state: dict[str, Any] = dict(initial_state(pages, model, provider))
     first_pass: dict[str, str] | None = None
     for event in build_graph().stream(state):
         for node, update in event.items():
@@ -63,21 +78,31 @@ def extract_with_trace(path: Path, model: str) -> dict[str, Any]:
     }
 
 
-def run_model(model: str, runs: int, docs: list[dict[str, Any]]) -> dict[str, Any]:
+def run_model(spec: str | None, runs: int, docs: list[dict[str, Any]], delay: float = 0) -> dict[str, Any]:
+    provider, model = parse_model_spec(spec)
+    label = f"{provider}/{model}"
     records = []
     for run in range(1, runs + 1):
         for doc in docs:
             path = DOCS_DIR / doc["file"]
-            print(f"[{model}] run {run}/{runs}  {doc['file']} ...", end=" ", flush=True)
+            if records and delay:
+                time.sleep(delay)  # stay under free-tier requests-per-minute limits
+            print(f"[{label}] run {run}/{runs}  {doc['file']} ...", end=" ", flush=True)
             try:
-                rec = extract_with_trace(path, model)
+                rec = extract_with_trace(path, provider, model)
                 rec["error"] = None
                 print(f"{rec['seconds']}s, retries={rec['retry_count']}")
             except Exception as exc:  # keep going; an error counts as all fields missing
                 rec = {"first_pass": {}, "final": {}, "retry_count": 0, "seconds": 0, "error": str(exc)}
                 print(f"ERROR: {exc}")
             records.append({"file": doc["file"], "run": run, **rec})
-    return {"model": model, "runs": runs, "created": datetime.now().isoformat(timespec="seconds"), "records": records}
+    return {
+        "model": label,
+        "provider": provider,
+        "runs": runs,
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "records": records,
+    }
 
 
 # ------------------------------- Scoring ------------------------------------
@@ -163,8 +188,7 @@ def markdown_report(reports: list[dict[str, Any]], fields: list[str]) -> str:
         "Scoring: amounts compared numerically, dates parsed (all plausible day/month readings), "
         "invoice numbers compared on alphanumerics, names by normalized fuzzy match. "
         "A value returned for a field that is not on the document counts as a hallucination. "
-        "Several totals sit on page 2 of multi-page PDFs, and the pipeline only reads page 1, "
-        "so those count as misses on purpose.",
+        "Multi-page PDFs are sent in full (up to `MAX_PDF_PAGES`), so totals on later pages are expected to be found.",
     ]
     return "\n".join(lines)
 
@@ -181,7 +205,13 @@ def update_readme(block: str) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", action="append", help="Ollama vision model (repeatable). Default: llava")
+    parser.add_argument(
+        "--model",
+        action="append",
+        help="provider/model, e.g. gemini/gemini-3.5-flash-lite or ollama/llava (repeatable). "
+        "A bare model name uses LLM_PROVIDER. Default: LLM_PROVIDER + LLM_MODEL from .env",
+    )
+    parser.add_argument("--delay", type=float, default=0, help="Seconds to wait between documents (rate limits)")
     parser.add_argument("--runs", type=int, default=1, help="Repeat each document N times to measure consistency")
     parser.add_argument("--only", nargs="*", help="Evaluate only these file names")
     parser.add_argument("--rescore", nargs="*", type=Path, help="Re-score saved results JSON files (no LLM calls)")
@@ -196,9 +226,10 @@ def main(argv: list[str] | None = None) -> None:
     else:
         RESULTS_DIR.mkdir(exist_ok=True)
         all_results = []
-        for model in args.model or ["llava"]:
-            results = run_model(model, args.runs, docs)
-            out = RESULTS_DIR / f"{model.replace(':', '_').replace('/', '_')}-{datetime.now():%Y%m%d-%H%M}.json"
+        for spec in args.model or [None]:
+            results = run_model(spec, args.runs, docs, delay=args.delay)
+            safe = results["model"].replace(":", "_").replace("/", "_")
+            out = RESULTS_DIR / f"{safe}-{datetime.now():%Y%m%d-%H%M}.json"
             out.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
             print(f"Saved raw predictions -> {out.relative_to(ROOT)}")
             all_results.append(results)

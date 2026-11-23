@@ -1,5 +1,5 @@
 """
-Invoice Extractor app built with Streamlit + LangGraph + Ollama.
+Invoice Extractor app built with Streamlit + LangGraph + a vision LLM (Ollama or a cloud API).
 
 This file is organized for teaching:
 1) Configuration and constants
@@ -14,18 +14,20 @@ import json
 from typing import Any
 
 import streamlit as st
-from pdf2image import convert_from_bytes
 
 from api.database import SessionLocal, init_db
 from api.repository import list_recent, save_extraction
 from core.invoice_pipeline import (
     DEFAULT_MODEL_NAME,
+    DEFAULT_PROVIDER,
     MISSING_VALUE,
     InvoiceState,
     build_graph,
-    file_bytes_to_base64_png,
+    file_to_base64_pages,
     initial_state,
 )
+from core.llm import get_provider
+from core.pdf import render_first_page
 
 # ----------------------------- Configuration ---------------------------------
 # Extraction logic lives in core/invoice_pipeline.py (shared with the REST API).
@@ -103,7 +105,7 @@ def save_to_history(result: InvoiceState, filename: str, mime_type: str) -> None
                 result,
                 filename=filename,
                 content_type=mime_type,
-                model_name=result["model_name"],
+                model_name=f"{result['provider']}/{result['model_name']}",
                 skip_if_duplicate=True,
             )
     except Exception as exc:  # keep the UI usable if the DB is down
@@ -137,8 +139,7 @@ def render_field_pair(data: dict[str, str], left_key: str, right_key: str) -> No
 
 def render_invoice_preview(file_bytes: bytes, mime_type: str) -> None:
     if mime_type == "application/pdf":
-        pages = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=150)
-        st.image(pages[0], caption="Invoice Preview (Page 1)")
+        st.image(render_first_page(file_bytes, dpi=150), caption="Invoice Preview (Page 1)")
         return
     st.image(file_bytes, caption="Invoice Preview")
 
@@ -147,20 +148,21 @@ def process_invoice(
     file_bytes: bytes, mime_type: str, model_name: str, status: Any, filename: str = "upload"
 ) -> InvoiceState:
     """Run the end-to-end extraction flow and return final graph state."""
-    status.write("Converting uploaded document to image...")
-    image_b64 = file_bytes_to_base64_png(file_bytes, mime_type)
+    status.write("Converting uploaded document to images...")
+    pages = file_to_base64_pages(file_bytes, mime_type)
+    status.write(f"Prepared {len(pages)} page image(s).")
 
     status.write(f"Initializing LangGraph pipeline with model: {model_name}")
     pipeline = build_graph()
 
-    start_state = initial_state(image_b64, model_name)
+    start_state = initial_state(pages, model_name)
 
     result = dict(start_state)
     for event in pipeline.stream(start_state):
         for node_name, state_update in event.items():
             result.update(state_update)
             if node_name == "extract_text":
-                status.write("Sent invoice to vision model and received raw text.")
+                status.write("Sent invoice pages to the vision model and received raw text.")
             elif node_name == "parse_fields":
                 status.write("Parsed raw text into structured fields.")
             elif node_name == "validate_output":
@@ -229,16 +231,17 @@ def main() -> None:
 
     with st.sidebar:
         st.subheader("Configuration")
+        st.caption(f"Provider: **{get_provider(DEFAULT_PROVIDER).label}** (set `LLM_PROVIDER` in `.env`)")
         model_name = st.text_input(
-            "Ollama Model",
+            "Model",
             value=DEFAULT_MODEL_NAME,
-            help="Vision-capable model name (for example: llava, llava:13b, bakllava).",
+            help="Vision-capable model, e.g. llava (Ollama), gemini-3.5-flash-lite, gpt-4.1-mini, claude-haiku-5-5.",
         )
 
     tab1, tab2 = st.tabs(["Extract Invoice", "Extraction History"])
 
     with tab1:
-        st.write("Upload a PDF or image invoice to extract structured fields with a local Ollama model.")
+        st.write("Upload a PDF or image invoice to extract structured fields with a vision LLM.")
         st.markdown("---")
         upload_col, preview_col = st.columns([1, 1])
         with upload_col:

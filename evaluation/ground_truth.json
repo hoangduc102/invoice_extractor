@@ -1,5 +1,5 @@
 {
-  "_README": "Hand-labelled from the documents in example_docs/. A field value may be a single value or a list of acceptable values. null means the field is not on the document, so the correct prediction is N/A (anything else is a hallucination). Dates are ISO (YYYY-MM-DD); amounts are plain numbers. 'notes' records where a value lives when it is NOT on page 1 (the pipeline only sends page 1 to the model). Bank statements are excluded: they are not invoices.",
+  "_README": "Hand-labelled from the documents in example_docs/. A field value may be a single value or a list of acceptable values. null means the field is not on the document, so the correct prediction is N/A (anything else is a hallucination). Dates are ISO (YYYY-MM-DD); amounts are plain numbers. 'notes' records where a value lives when it is NOT on page 1 (useful when checking multi-page handling). Bank statements are excluded: they are not invoices.",
   "fields": ["INVOICE_NUMBER", "DATE", "DUE_DATE", "VENDOR_NAME", "CUSTOMER_NAME", "SUBTOTAL", "TAX", "TOTAL", "CURRENCY"],
   "documents": [
     {

@@ -1,5 +1,7 @@
 """
-Framework-agnostic invoice extraction pipeline (LangGraph + Ollama).
+Framework-agnostic invoice extraction pipeline (LangGraph + a vision LLM).
+
+The LLM backend (Ollama, Gemini, OpenAI, Anthropic) is chosen in core/llm.py.
 
 Shared by the Streamlit UI (invoice_extractor.py) and the REST API (api/).
 Nothing in this module imports Streamlit or FastAPI.
@@ -17,17 +19,21 @@ from typing import Any, TypedDict
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
-from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from PIL import Image
+
+from core.llm import default_model, get_chat_model, get_provider
+from core.pdf import render_pdf_pages
 
 load_dotenv()
 
 # ----------------------------- Configuration ---------------------------------
-DEFAULT_MODEL_NAME = os.getenv("DEFAULT_MODEL", "llava")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+DEFAULT_PROVIDER = get_provider().name
+DEFAULT_MODEL_NAME = default_model()
 MISSING_VALUE = "N/A"
 MAX_RETRIES = 2
+# Multi-page PDFs: totals usually sit on the last page. Capped to bound image tokens per request.
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "5"))
 
 INVOICE_FIELDS = [
     "INVOICE_NUMBER",
@@ -47,8 +53,16 @@ INVOICE_FIELDS = [
 ]
 CRITICAL_FIELDS = ["INVOICE_NUMBER", "VENDOR_NAME", "TOTAL", "DATE"]
 
+_GROUNDING_RULES = (
+    "Rules:\n"
+    "- Copy values exactly as printed on the document. Never calculate, sum, convert, or infer a value.\n"
+    "- Do not add up line items to get a subtotal or total, and do not derive a due date from payment terms.\n"
+    "- If a field is not printed anywhere on the document, answer N/A. N/A is a correct answer, not a failure.\n"
+    "- The document may have several pages (images in page order). Totals are often on the last page.\n\n"
+)
+
 _OUTPUT_FORMAT = (
-    "Return data in this EXACT format (use 'N/A' if not found):\n\n"
+    "Return data in this EXACT format (use 'N/A' if not printed):\n\n"
     "INVOICE_NUMBER: ...\nDATE: ...\nDUE_DATE: ...\nVENDOR_NAME: ...\n"
     "VENDOR_ADDRESS: ...\nCUSTOMER_NAME: ...\nCUSTOMER_ADDRESS: ...\n"
     "SUBTOTAL: ...\nTAX: ...\nTOTAL: ...\nCURRENCY: ...\n"
@@ -57,43 +71,55 @@ _OUTPUT_FORMAT = (
 )
 
 EXTRACTION_PROMPT = (
-    "You are an expert invoice data extractor. Analyze this invoice image and "
-    "extract ALL information. " + _OUTPUT_FORMAT
+    "You are an expert invoice data extractor. Extract the information printed on this invoice.\n"
+    + _GROUNDING_RULES
+    + _OUTPUT_FORMAT
 )
 
 
 def build_correction_prompt(missing_fields: list[str]) -> str:
+    """Second look at ONLY the fields that came back empty, without pressuring the model to invent them."""
     return (
-        "You are an expert invoice data extractor. In your previous attempt, you missed "
-        f"these critical fields: {', '.join(missing_fields)}.\n"
-        "Please analyze this invoice image carefully again and extract all information. "
-        "Especially, make sure to find the missing fields.\n" + _OUTPUT_FORMAT
+        "You are an expert invoice data extractor. A first pass returned N/A for these fields: "
+        f"{', '.join(missing_fields)}.\n"
+        "Look again carefully at every page, including headers, footers, small print, rotated text and "
+        "the last page. Report a value only if it is actually printed. Some documents (estimates, "
+        "truncated or multi-page samples) genuinely lack these fields; then N/A is the right answer.\n"
+        + _GROUNDING_RULES
+        + "Return ONLY these fields, one per line, as FIELD_NAME: value\n"
+        + "\n".join(f"{field}: ..." for field in missing_fields)
     )
 
 
 # ----------------------------- Workflow State --------------------------------
 class InvoiceState(TypedDict):
-    image_b64: str
+    images_b64: list[str]  # one PNG per page, in order
+    provider: str
     model_name: str
     raw_text: str
     structured_data: dict[str, str]
     retry_count: int
     missing_fields: list[str]
+    stalled: bool  # a retry found nothing new -> further retries would just repeat it
 
 
 # ---------------------------- Pure Helper Logic -------------------------------
-def file_bytes_to_base64_png(file_bytes: bytes, mime_type: str) -> str:
-    """Convert a PDF (first page) or image upload into base64-encoded PNG."""
-    if mime_type == "application/pdf":
-        from pdf2image import convert_from_bytes  # needs Poppler; import lazily
-
-        image = convert_from_bytes(file_bytes, first_page=1, last_page=1, dpi=200)[0]
-    else:
-        image = Image.open(io.BytesIO(file_bytes))
-
+def _png_b64(image: Image.Image) -> str:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def file_to_base64_pages(file_bytes: bytes, mime_type: str, max_pages: int = MAX_PDF_PAGES) -> list[str]:
+    """PDF -> one base64 PNG per page (up to max_pages); image -> a single base64 PNG."""
+    if mime_type == "application/pdf":
+        return [_png_b64(page) for page in render_pdf_pages(file_bytes, max_pages=max_pages)]
+    return [_png_b64(Image.open(io.BytesIO(file_bytes)))]
+
+
+def file_bytes_to_base64_png(file_bytes: bytes, mime_type: str) -> str:
+    """First page only (kept for callers that need a single preview image)."""
+    return file_to_base64_pages(file_bytes, mime_type, max_pages=1)[0]
 
 
 def parse_invoice_fields(raw_text: str) -> dict[str, str]:
@@ -180,45 +206,56 @@ def parse_amount(value: str | None) -> Decimal | None:
 
 
 # ---------------------------- LangGraph Nodes ---------------------------------
-def _call_vision_model(model_name: str, prompt: str, image_b64: str) -> str:
-    llm = ChatOllama(model=model_name, temperature=0, base_url=OLLAMA_BASE_URL)
-    message = HumanMessage(
-        content=[
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
-        ]
-    )
-    return normalize_model_output(llm.invoke([message]).content)
+def _call_vision_model(state: InvoiceState, prompt: str) -> str:
+    llm = get_chat_model(state.get("provider") or DEFAULT_PROVIDER, state["model_name"])
+    pages = state["images_b64"]
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for number, image_b64 in enumerate(pages, start=1):
+        if len(pages) > 1:
+            content.append({"type": "text", "text": f"Page {number} of {len(pages)}:"})
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}})
+    return normalize_model_output(llm.invoke([HumanMessage(content=content)]).content)
 
 
 def extract_text_node(state: InvoiceState) -> dict[str, str]:
-    """Step 1: Send invoice image to Ollama vision model."""
-    return {"raw_text": _call_vision_model(state["model_name"], EXTRACTION_PROMPT, state["image_b64"])}
+    """Step 1: Send every page of the invoice to the vision model."""
+    return {"raw_text": _call_vision_model(state, EXTRACTION_PROMPT)}
 
 
 def parse_fields_node(state: InvoiceState) -> dict[str, dict[str, str]]:
-    """Step 2: Convert model text output into a structured dictionary."""
-    return {"structured_data": parse_invoice_fields(state["raw_text"])}
+    """Step 2: Convert model text output into a structured dictionary.
+
+    After a retry, only the fields that were missing are taken from the new answer. Fields the
+    first pass already read stay untouched, so a retry can fill gaps but never overwrite good values.
+    """
+    parsed = parse_invoice_fields(state["raw_text"])
+    if not state.get("retry_count"):
+        return {"structured_data": parsed}
+    merged = {k: v for k, v in state["structured_data"].items() if not k.startswith("_")}
+    for field in state.get("missing_fields", []):
+        merged[field] = parsed.get(field, MISSING_VALUE)
+    return {"structured_data": merged}
 
 
 def validate_output_node(state: InvoiceState) -> dict[str, Any]:
     """Step 3: Validate extracted fields and flag missing critical data."""
     validated = add_validation_message(state["structured_data"])
-    return {"structured_data": validated, "missing_fields": find_missing_critical(validated)}
+    missing = find_missing_critical(validated)
+    stalled = bool(state.get("retry_count")) and set(missing) == set(state.get("missing_fields", []))
+    return {"structured_data": validated, "missing_fields": missing, "stalled": stalled}
 
 
 def should_retry(state: InvoiceState) -> str:
-    """Route to correct_extraction if critical fields are missing and retries remain."""
-    if state.get("missing_fields") and state.get("retry_count", 0) < MAX_RETRIES:
+    """Retry while critical fields are missing, retries remain, and the last retry made progress."""
+    if state.get("missing_fields") and state.get("retry_count", 0) < MAX_RETRIES and not state.get("stalled"):
         return "correct_extraction"
     return "end"
 
 
 def correct_extraction_node(state: InvoiceState) -> dict[str, Any]:
-    """Step 4: Prompt the LLM again, instructing it to find the missing fields."""
-    prompt = build_correction_prompt(state["missing_fields"])
+    """Step 4: Ask the LLM to look again for the missing fields only."""
     return {
-        "raw_text": _call_vision_model(state["model_name"], prompt, state["image_b64"]),
+        "raw_text": _call_vision_model(state, build_correction_prompt(state["missing_fields"])),
         "retry_count": state.get("retry_count", 0) + 1,
     }
 
@@ -244,18 +281,25 @@ def build_graph():
     return graph.compile()
 
 
-def initial_state(image_b64: str, model_name: str) -> InvoiceState:
+def initial_state(
+    images_b64: str | list[str], model_name: str | None = None, provider: str | None = None
+) -> InvoiceState:
+    provider = get_provider(provider).name
     return {
-        "image_b64": image_b64,
-        "model_name": model_name,
+        "images_b64": [images_b64] if isinstance(images_b64, str) else list(images_b64),
+        "provider": provider,
+        "model_name": model_name or default_model(provider),
         "raw_text": "",
         "structured_data": {},
         "retry_count": 0,
         "missing_fields": [],
+        "stalled": False,
     }
 
 
-def run_extraction(file_bytes: bytes, mime_type: str, model_name: str) -> InvoiceState:
+def run_extraction(
+    file_bytes: bytes, mime_type: str, model_name: str | None = None, provider: str | None = None
+) -> InvoiceState:
     """Run the full pipeline synchronously and return the final graph state."""
-    image_b64 = file_bytes_to_base64_png(file_bytes, mime_type)
-    return build_graph().invoke(initial_state(image_b64, model_name))
+    pages = file_to_base64_pages(file_bytes, mime_type)
+    return build_graph().invoke(initial_state(pages, model_name, provider))
